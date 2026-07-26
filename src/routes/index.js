@@ -25,4 +25,8 @@ router.use('/admin', require('./admin.routes'));
 
 router.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
+// Public (no auth) — lets every client, even a stale/broken one, check
+// whether a newer APK exists and prompt the user to install it.
+router.get('/app/version', (req, res) => res.json(require('../config/appVersion')));
+
 module.exports = router;
