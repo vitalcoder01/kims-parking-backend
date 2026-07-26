@@ -1,5 +1,5 @@
 const express = require('express');
-const rateLimit = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const { login, me } = require('../controllers/auth.controller');
 const { requireAuth } = require('../middleware/auth.middleware');
 
@@ -15,7 +15,7 @@ const loginLimiter = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: req => (req.body?.employeeId ? String(req.body.employeeId).toUpperCase() : req.ip),
+  keyGenerator: req => (req.body?.employeeId ? String(req.body.employeeId).toUpperCase() : ipKeyGenerator(req.ip)),
   message: { error: { message: 'Too many login attempts. Please wait a few minutes and try again.' } },
 });
 

@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const rateLimit = require('express-rate-limit');
+const {rateLimit, ipKeyGenerator} = require('express-rate-limit');
 
 const { NODE_ENV, CORS_ORIGIN, LOG_LEVEL } = require('./config/env');
 const routes = require('./routes');
@@ -30,7 +30,7 @@ app.use('/api', rateLimit({
   limit: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: req => req.headers.authorization || req.ip,
+  keyGenerator: req => req.headers.authorization || ipKeyGenerator(req.ip),
 }));
 
 app.get('/', (req, res) => {
