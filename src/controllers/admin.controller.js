@@ -81,4 +81,35 @@ const attendanceToday = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { dashboard, listUsers, createUser, updateUser, resetPassword, deleteUser, attendanceToday };
+// Calendar view: every attendance day for every user in a given month,
+// grouped per user so the admin UI can render one calendar strip per person.
+const MONTH_RE = /^\d{4}-\d{2}$/;
+const attendanceMonthly = asyncHandler(async (req, res) => {
+  const month = typeof req.query.month === 'string' && MONTH_RE.test(req.query.month)
+    ? req.query.month
+    : new Date().toISOString().slice(0, 7);
+
+  const records = await attendanceService.monthly(month);
+  const byUser = new Map();
+  for (const r of records) {
+    if (!byUser.has(r.userId)) {
+      byUser.set(r.userId, {
+        userId: r.userId,
+        name: r.user?.name,
+        role: r.user?.role,
+        employeeId: r.user?.employeeId,
+        days: [],
+      });
+    }
+    byUser.get(r.userId).days.push({
+      date: r.date.toISOString().slice(0, 10),
+      checkIn: r.checkIn,
+      checkOut: r.checkOut,
+      vehiclesHandled: r.vehiclesHandled,
+    });
+  }
+
+  res.json({ month, users: [...byUser.values()] });
+});
+
+module.exports = { dashboard, listUsers, createUser, updateUser, resetPassword, deleteUser, attendanceToday, attendanceMonthly };

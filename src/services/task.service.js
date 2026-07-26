@@ -78,12 +78,43 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
   return task;
 }
 
-// Valet: assigns an available driver to an already-created task.
+// Doctor/staff: request retrieval of their own currently-parked car. This is
+// the ONLY way a retrieve task can come into existence — the valet cannot
+// invent one — so a driver never gets sent to pull a car nobody asked for.
+async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng }) {
+  const slot = await prisma.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
+  if (!slot) throw ApiError.badRequest('No parked car found for your account');
+
+  const existing = await prisma.parkingTask.findFirst({
+    where: { slotId: slot.id, type: 'retrieve', status: { not: 'completed' } },
+  });
+  if (existing) throw ApiError.conflict('Retrieval has already been requested for this car');
+
+  const task = await prisma.parkingTask.create({
+    data: {
+      type: 'retrieve',
+      doctorId,
+      carNumber: slot.carNumber ?? '',
+      slotId: slot.id,
+      status: 'requested',
+      requestedAt: new Date(),
+      eta: eta ?? null,
+      destinationLat: destinationLat ?? null,
+      destinationLng: destinationLng ?? null,
+    },
+    include: taskInclude,
+  });
+  cache.invalidate('tasks:');
+  return task;
+}
+
+// Valet: assigns an available driver to a requested (or already-assigned,
+// e.g. reassigning) task.
 async function assignDriver(taskId, driverId) {
   const task = await prisma.$transaction(async (tx) => {
     const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!existing) throw ApiError.notFound('Task not found');
-    assertTransition(existing, ['assigned'], 'assign a driver');
+    assertTransition(existing, ['requested', 'assigned'], 'assign a driver');
 
     const driver = await tx.driver.findUnique({ where: { id: driverId } });
     if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
@@ -255,6 +286,7 @@ module.exports = {
   listTasks,
   getTask,
   createTask,
+  requestRetrieval,
   assignDriver,
   markKeyCollected,
   markInTransit,

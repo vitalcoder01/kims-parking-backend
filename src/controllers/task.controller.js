@@ -24,13 +24,23 @@ const create = asyncHandler(async (req, res) => {
   if (!type || !doctorId || !carNumber) {
     throw ApiError.badRequest('type, doctorId and carNumber are required');
   }
+  if (type === 'retrieve') {
+    throw ApiError.badRequest('Retrieval must be requested by the doctor/staff who owns the car (POST /tasks/request-retrieval)');
+  }
 
   const task = await taskService.createTask({ type, doctorId, carNumber, slotId, destinationLat, destinationLng });
   await attendanceService.incrementVehiclesHandled(req.user.id);
-  if (type === 'park') {
-    await attendanceService.ensurePresent(doctorId).catch(() => {});
-  }
+  await attendanceService.ensurePresent(doctorId).catch(() => {});
 
+  res.status(201).json({ task: serializeTask(task) });
+});
+
+// Doctor/staff: request retrieval of their own parked car. The car's real
+// GPS destination is wherever they are standing right now (their own
+// phone) — that's who the driver is actually bringing it back to.
+const requestRetrieval = asyncHandler(async (req, res) => {
+  const { eta, destinationLat, destinationLng } = req.body;
+  const task = await taskService.requestRetrieval({ doctorId: req.user.id, eta, destinationLat, destinationLng });
   res.status(201).json({ task: serializeTask(task) });
 });
 
@@ -83,4 +93,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, assignDriver, keyCollected, inTransit, park, retrieve, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, keyCollected, inTransit, park, retrieve, updateLocation };

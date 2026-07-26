@@ -13,5 +13,6 @@ router.patch('/users/:id', ctrl.updateUser);
 router.patch('/users/:id/password', ctrl.resetPassword);
 router.delete('/users/:id', ctrl.deleteUser);
 router.get('/attendance/today', ctrl.attendanceToday);
+router.get('/attendance/monthly', ctrl.attendanceMonthly);
 
 module.exports = router;

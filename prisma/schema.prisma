@@ -33,6 +33,7 @@ enum TaskType {
 }
 
 enum TaskStatus {
+  requested
   assigned
   key_collected
   in_transit
@@ -135,10 +136,11 @@ model ParkingTask {
   driver   Driver? @relation("DriverTasks", fields: [driverId], references: [id])
 
   status           TaskStatus @default(assigned)
+  requestedAt      DateTime? // when the doctor asked for retrieval, before a driver is assigned
   assignedAt       DateTime?
   keyCollectedAt   DateTime?
   completedAt      DateTime?
-  eta              Int? // minutes
+  eta              Int? // minutes — the doctor's requested departure time for a retrieval
   trackingProgress Float? // 0..1
 
   // Live GPS position reported by the assigned driver's phone while en route.

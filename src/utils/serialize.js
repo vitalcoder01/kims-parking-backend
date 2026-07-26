@@ -20,6 +20,7 @@ function serializeTask(task) {
     driverId: task.driverId ?? undefined,
     driverName: task.driver?.user?.name,
     status: task.status,
+    requestedAt: task.requestedAt ?? undefined,
     assignedAt: task.assignedAt,
     keyCollectedAt: task.keyCollectedAt,
     completedAt: task.completedAt,

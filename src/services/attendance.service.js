@@ -63,4 +63,17 @@ async function listToday() {
   });
 }
 
-module.exports = { checkIn, checkOut, ensurePresent, incrementVehiclesHandled, history, listToday };
+// Every attendance record for a given calendar month ("YYYY-MM"), across
+// every user — the admin calendar view groups these client-side per person.
+async function monthly(month) {
+  const [y, m] = month.split('-').map(Number);
+  const start = new Date(Date.UTC(y, m - 1, 1));
+  const end = new Date(Date.UTC(y, m, 1));
+  return prisma.attendance.findMany({
+    where: { date: { gte: start, lt: end } },
+    include: { user: true },
+    orderBy: [{ userId: 'asc' }, { date: 'asc' }],
+  });
+}
+
+module.exports = { checkIn, checkOut, ensurePresent, incrementVehiclesHandled, history, listToday, monthly };
