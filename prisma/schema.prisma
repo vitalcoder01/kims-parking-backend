@@ -152,6 +152,14 @@ model ParkingTask {
   driverStartLat Float?
   driverStartLng Float?
 
+  // Real destination for distance/ETA math — captured from the reporting
+  // staff member's own phone GPS at the moment the trip is created (the
+  // valet's location for a retrieve trip's "bring it to me" point), so
+  // progress/ETA are computed against an actual place instead of a guessed
+  // constant distance.
+  destinationLat Float?
+  destinationLng Float?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

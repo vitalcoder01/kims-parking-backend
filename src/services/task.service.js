@@ -57,7 +57,7 @@ async function getTask(id) {
 
 // Valet: "Key Received" — creates a PARK task, attendance is marked by the
 // caller (controller) since it is a distinct concern from task creation.
-async function createTask({ type, doctorId, carNumber, slotId }) {
+async function createTask({ type, doctorId, carNumber, slotId, destinationLat, destinationLng }) {
   const doctor = await prisma.user.findUnique({ where: { id: doctorId } });
   if (!doctor) throw ApiError.badRequest('doctorId does not reference a valid user');
 
@@ -69,6 +69,8 @@ async function createTask({ type, doctorId, carNumber, slotId }) {
       slotId: slotId ?? null,
       status: 'assigned',
       assignedAt: new Date(),
+      destinationLat: destinationLat ?? null,
+      destinationLng: destinationLng ?? null,
     },
     include: taskInclude,
   });

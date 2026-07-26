@@ -14,6 +14,21 @@ async function checkIn(userId, gate) {
   });
 }
 
+// Used by automatic presence triggers (key handover, driver starting a
+// trip) — unlike checkIn(), this never overwrites an existing check-in time.
+// A doctor handing over a second car at 2pm shouldn't erase their real 8am
+// arrival; this only fills in checkIn if today's record doesn't have one yet.
+async function ensurePresent(userId) {
+  const date = todayDateOnly();
+  const existing = await prisma.attendance.findUnique({ where: { userId_date: { userId, date } } });
+  if (existing?.checkIn) return existing;
+  return prisma.attendance.upsert({
+    where: { userId_date: { userId, date } },
+    update: { checkIn: new Date() },
+    create: { userId, date, checkIn: new Date() },
+  });
+}
+
 async function checkOut(userId) {
   const date = todayDateOnly();
   return prisma.attendance.update({
@@ -39,4 +54,13 @@ async function history(userId, { limit = 30 } = {}) {
   });
 }
 
-module.exports = { checkIn, checkOut, incrementVehiclesHandled, history };
+async function listToday() {
+  const date = todayDateOnly();
+  return prisma.attendance.findMany({
+    where: { date },
+    include: { user: true },
+    orderBy: { checkIn: 'asc' },
+  });
+}
+
+module.exports = { checkIn, checkOut, ensurePresent, incrementVehiclesHandled, history, listToday };

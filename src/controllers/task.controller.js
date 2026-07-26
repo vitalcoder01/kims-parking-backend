@@ -15,15 +15,21 @@ const get = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
-// Valet: "Key Received" — also marks the valet's attendance for today.
+// Valet: "Key Received" — also marks the valet's attendance for today, and
+// for a park task (the doctor/staff physically handing over their key),
+// marks that person present too — handing your key to the valet is real
+// proof you're on-site, so there's no separate manual check-in step needed.
 const create = asyncHandler(async (req, res) => {
-  const { type, doctorId, carNumber, slotId } = req.body;
+  const { type, doctorId, carNumber, slotId, destinationLat, destinationLng } = req.body;
   if (!type || !doctorId || !carNumber) {
     throw ApiError.badRequest('type, doctorId and carNumber are required');
   }
 
-  const task = await taskService.createTask({ type, doctorId, carNumber, slotId });
+  const task = await taskService.createTask({ type, doctorId, carNumber, slotId, destinationLat, destinationLng });
   await attendanceService.incrementVehiclesHandled(req.user.id);
+  if (type === 'park') {
+    await attendanceService.ensurePresent(doctorId).catch(() => {});
+  }
 
   res.status(201).json({ task: serializeTask(task) });
 });
@@ -43,6 +49,7 @@ const keyCollected = asyncHandler(async (req, res) => {
 
 const inTransit = asyncHandler(async (req, res) => {
   const task = await taskService.markInTransit(req.params.id);
+  await attendanceService.ensurePresent(req.user.id).catch(() => {});
   res.json({ task: serializeTask(task) });
 });
 

@@ -63,4 +63,88 @@ async function createUser({ employeeId, name, role, password, department, cardCo
   });
 }
 
-module.exports = { findByCardCode, listUsers, createUser };
+// Admin: edit an existing account's profile fields and/or role. A role
+// change into/out of 'driver' creates/removes the linked Driver row so the
+// account is immediately consistent — e.g. "transferring" a staff member to
+// a driver role makes them assignable to tasks right away, and moving a
+// driver to another role cleanly drops their driver profile instead of
+// leaving an orphaned one behind.
+async function updateUser(id, { name, role, department, cardCode, phone, carNumber }) {
+  const existing = await prisma.user.findUnique({ where: { id }, include: { driver: true } });
+  if (!existing) throw ApiError.notFound('User not found');
+
+  if (cardCode && cardCode !== existing.cardCode) {
+    const codeTaken = await prisma.user.findUnique({ where: { cardCode } });
+    if (codeTaken) throw ApiError.conflict(`Card code ${cardCode} is already in use`);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id },
+      data: {
+        ...(name !== undefined && { name: name.trim() }),
+        ...(role !== undefined && { role }),
+        ...(department !== undefined && { department: department?.trim() || null }),
+        ...(cardCode !== undefined && { cardCode: cardCode || null }),
+        ...(phone !== undefined && { phone: phone?.trim() || null }),
+        ...(carNumber !== undefined && { carNumber: carNumber?.trim().toUpperCase() || null }),
+      },
+    });
+
+    if (role !== undefined && role !== existing.role) {
+      if (role === 'driver' && !existing.driver) {
+        await tx.driver.create({ data: { userId: id, status: 'available' } });
+      } else if (role !== 'driver' && existing.driver) {
+        await tx.driver.delete({ where: { userId: id } });
+      }
+    }
+
+    return tx.user.findUnique({ where: { id }, include: { driver: true } });
+  });
+}
+
+// Admin: reset an account's password (e.g. after a staff member forgets it).
+async function resetPassword(id, newPassword) {
+  const existing = await prisma.user.findUnique({ where: { id } });
+  if (!existing) throw ApiError.notFound('User not found');
+
+  const passwordHash = await bcrypt.hash(newPassword, 10);
+  await prisma.user.update({ where: { id }, data: { password: passwordHash } });
+}
+
+// Admin: remove an account entirely. Driver profile and attendance history
+// cascade automatically (schema onDelete: Cascade). Task history does NOT
+// cascade — a doctor/staff/driver with any park/retrieve tasks on record
+// can't be deleted, by design, so that real history is never silently
+// destroyed by removing an account; the error here explains that instead of
+// leaking the raw database constraint failure.
+async function deleteUser(id) {
+  const existing = await prisma.user.findUnique({ where: { id } });
+  if (!existing) throw ApiError.notFound('User not found');
+
+  try {
+    await prisma.user.delete({ where: { id } });
+  } catch (err) {
+    if (err.code === 'P2003') {
+      throw ApiError.conflict(
+        `Cannot delete ${existing.name} — they have parking task history on record. Consider this a permanent record; if they've left, changing their role or leaving the account inactive is safer than deleting it.`,
+      );
+    }
+    throw err;
+  }
+}
+
+// Self-service — a user updating their own car number/phone, not an admin
+// editing someone else's account (see updateUser for that, admin-only).
+async function updateOwnProfile(id, { carNumber, phone }) {
+  return prisma.user.update({
+    where: { id },
+    data: {
+      ...(carNumber !== undefined && { carNumber: carNumber?.trim().toUpperCase() || null }),
+      ...(phone !== undefined && { phone: phone?.trim() || null }),
+    },
+    include: { driver: true },
+  });
+}
+
+module.exports = { findByCardCode, listUsers, createUser, updateUser, resetPassword, deleteUser, updateOwnProfile };

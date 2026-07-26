@@ -7,5 +7,6 @@ const router = express.Router();
 router.use(requireAuth);
 
 router.get('/by-card/:code', requireRole('valet', 'admin'), ctrl.lookupByCardCode);
+router.patch('/me', ctrl.updateMe);
 
 module.exports = router;

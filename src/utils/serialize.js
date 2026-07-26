@@ -30,6 +30,8 @@ function serializeTask(task) {
     locationUpdatedAt: task.locationUpdatedAt ?? undefined,
     driverStartLat: task.driverStartLat ?? undefined,
     driverStartLng: task.driverStartLng ?? undefined,
+    destinationLat: task.destinationLat ?? undefined,
+    destinationLng: task.destinationLng ?? undefined,
   };
 }
 

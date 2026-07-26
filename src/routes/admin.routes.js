@@ -9,5 +9,9 @@ router.use(requireAuth, requireRole('admin'));
 router.get('/dashboard', ctrl.dashboard);
 router.get('/users', ctrl.listUsers);
 router.post('/users', ctrl.createUser);
+router.patch('/users/:id', ctrl.updateUser);
+router.patch('/users/:id/password', ctrl.resetPassword);
+router.delete('/users/:id', ctrl.deleteUser);
+router.get('/attendance/today', ctrl.attendanceToday);
 
 module.exports = router;
