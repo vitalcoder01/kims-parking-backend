@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.development
+.env.production
+.env.local
+dist/
+*.log
+npm-debug.log*
+.DS_Store
+prisma/migrations/**/migration.sql.bak

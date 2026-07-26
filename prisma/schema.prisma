@@ -1,0 +1,224 @@
+// KIMS Hospital Smart Parking — Prisma schema
+// Datasource points at Supabase Postgres: `url` uses the pooled connection
+// (port 6543, pgbouncer) for normal app queries, `directUrl` uses the direct
+// connection (port 5432) which Prisma needs to run migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  doctor
+  staff
+  valet
+  driver
+  admin
+}
+
+enum DriverStatus {
+  available
+  busy
+  off
+}
+
+enum TaskType {
+  park
+  retrieve
+}
+
+enum TaskStatus {
+  assigned
+  key_collected
+  in_transit
+  completed
+}
+
+enum SlotStatus {
+  free
+  occupied
+  reserved
+}
+
+enum VisitorStatus {
+  pending
+  parked
+  retrieved
+}
+
+enum NotificationType {
+  alarm
+  info
+  warning
+}
+
+model User {
+  id         String   @id @default(cuid())
+  employeeId String   @unique
+  password   String // bcrypt hash
+  name       String
+  role       Role
+  department String?
+  cardCode   String?  @unique // 3-digit valet identification code (doctor/staff only)
+  carNumber  String?
+  phone      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  driver          Driver?
+  tasksAsDoctor   ParkingTask[]  @relation("DoctorTasks")
+  parkedSlots     ParkingSlot[]  @relation("SlotDoctor")
+  notifications   Notification[]
+  attendance      Attendance[]
+
+  @@index([role])
+  @@map("users")
+}
+
+// Operational state for driver-role users, kept separate from User so the
+// login identity and driver assignment state can never drift apart (this is
+// exactly the bug class the mobile app hit before linkedDriverId was added).
+model Driver {
+  id            String       @id @default(cuid())
+  userId        String       @unique
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status        DriverStatus @default(available)
+  currentTaskId String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  tasksAsDriver ParkingTask[] @relation("DriverTasks")
+
+  @@index([status])
+  @@map("drivers")
+}
+
+model ParkingSlot {
+  id        String     @id // human-readable code, e.g. "A-001"
+  block     String
+  number    Int
+  status    SlotStatus @default(free)
+  carNumber String?
+  doctorId  String?
+  doctor    User?      @relation("SlotDoctor", fields: [doctorId], references: [id])
+
+  // The task currently occupying this slot (nullable — cleared on retrieval).
+  taskId String?      @unique
+  task   ParkingTask? @relation("CurrentSlotTask", fields: [taskId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([block])
+  @@index([status])
+  @@map("parking_slots")
+}
+
+model ParkingTask {
+  id       String     @id @default(cuid())
+  type     TaskType
+  doctorId String
+  doctor   User       @relation("DoctorTasks", fields: [doctorId], references: [id])
+  carNumber String
+
+  // Plain reference (not a formal relation) — a slot is visited by more than
+  // one task over its lifetime (a park task, later a retrieve task), so this
+  // is intentionally not the same edge as ParkingSlot.taskId above.
+  slotId String?
+
+  driverId String?
+  driver   Driver? @relation("DriverTasks", fields: [driverId], references: [id])
+
+  status           TaskStatus @default(assigned)
+  assignedAt       DateTime?
+  keyCollectedAt   DateTime?
+  completedAt      DateTime?
+  eta              Int? // minutes
+  trackingProgress Float? // 0..1
+
+  // Live GPS position reported by the assigned driver's phone while en route.
+  driverLat         Float?
+  driverLng         Float?
+  locationUpdatedAt DateTime?
+
+  // First GPS fix after the driver starts moving — the anchor every viewer
+  // (driver's own screens + doctor/staff/valet) computes trip progress from,
+  // so everyone derives the same percentage from the same two points.
+  driverStartLat Float?
+  driverStartLng Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  occupyingSlot ParkingSlot? @relation("CurrentSlotTask")
+
+  @@index([doctorId])
+  @@index([driverId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("parking_tasks")
+}
+
+model Visitor {
+  id         String        @id @default(cuid())
+  name       String
+  carNumber  String
+  mobile     String
+  slotId     String?
+  driverName String?
+  status     VisitorStatus @default(pending)
+  token      String
+
+  trackingProgress Float?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("visitors")
+}
+
+model Notification {
+  id     String @id @default(cuid())
+  // Role-wide broadcast target ('doctor' | 'staff' | 'valet' | 'driver' |
+  // 'admin' | 'all') OR a precise 'driver:<id>' style tag; kept as a plain
+  // string to match the flexible targeting already used by the mobile app.
+  targetRole String
+
+  // Precise single-user target when the notification is meant for exactly
+  // one person (in addition to / instead of targetRole).
+  targetUserId String?
+  targetUser   User?             @relation(fields: [targetUserId], references: [id])
+
+  title     String
+  body      String
+  type      NotificationType @default(info)
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([targetRole])
+  @@index([targetUserId])
+  @@index([read])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model Attendance {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date            DateTime  @db.Date
+  checkIn         DateTime?
+  checkOut        DateTime?
+  vehiclesHandled Int       @default(0)
+  gate            String?
+  createdAt       DateTime  @default(now())
+
+  @@unique([userId, date])
+  @@map("attendance")
+}
