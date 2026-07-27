@@ -124,7 +124,19 @@ async function updateUser(id, { name, role, department, cardCode, phone, carNumb
       if (role === 'driver' && !existing.driver) {
         await tx.driver.create({ data: { userId: id, status: 'available' } });
       } else if (role !== 'driver' && existing.driver) {
-        await tx.driver.delete({ where: { userId: id } });
+        // A driver with any task history (i.e. any real driver after their
+        // first day) can't have their Driver row deleted — ParkingTask.driverId
+        // references it with no cascade, by design, so history is never lost.
+        // Leave the row in place rather than failing the whole edit over it;
+        // it's harmless once the account's role is no longer 'driver' (it
+        // stops showing up as a driver anywhere and is never assignable again).
+        await tx.driver.delete({ where: { userId: id } }).catch(async (err) => {
+          if (err.code !== 'P2003') throw err;
+          // Can't delete — force it inert (off duty, unassigned) so it can
+          // never be picked for a new task; listDrivers also filters on the
+          // linked user's current role as a second guard against this.
+          await tx.driver.update({ where: { userId: id }, data: { status: 'off', currentTaskId: null } });
+        });
       }
     }
 

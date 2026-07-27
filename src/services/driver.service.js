@@ -7,7 +7,12 @@ const CACHE_TTL_MS = 2500;
 async function listDrivers({ status } = {}) {
   const key = `drivers:${status ?? ''}`;
   return cache.cached(key, CACHE_TTL_MS, () => prisma.driver.findMany({
-    where: { ...(status && { status }) },
+    // A Driver row can outlive its user's 'driver' role (see user.service.js
+    // updateUser — it can't be hard-deleted once it has task history), so
+    // this filters on the linked user's *current* role too, not just the
+    // row's own existence, or a transferred-away account could still be
+    // assigned new tasks.
+    where: { ...(status && { status }), user: { role: 'driver' } },
     include: { user: true },
     orderBy: { createdAt: 'asc' },
   }));

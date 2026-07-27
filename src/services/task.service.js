@@ -2,6 +2,24 @@ const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
 const cache = require('../utils/responseCache');
 
+// Read Committed (Postgres/Prisma's default) lets two concurrent
+// transactions both read "not taken yet" before either writes — e.g. two
+// valets assigning two different tasks to the same driver at the same
+// instant, or a doctor double-tapping "Request Retrieval". Serializable
+// makes Postgres abort the loser with a real conflict error instead of
+// silently letting both succeed; this maps that abort to a friendly
+// "try again" instead of a raw 500.
+async function runSerializable(fn) {
+  try {
+    return await prisma.$transaction(fn, { isolationLevel: 'Serializable' });
+  } catch (err) {
+    if (err.code === 'P2034') {
+      throw ApiError.conflict('That just changed under you — please try again');
+    }
+    throw err;
+  }
+}
+
 const CACHE_TTL_MS = 2500;
 
 const taskInclude = {
@@ -82,27 +100,29 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
 // the ONLY way a retrieve task can come into existence — the valet cannot
 // invent one — so a driver never gets sent to pull a car nobody asked for.
 async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng }) {
-  const slot = await prisma.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
-  if (!slot) throw ApiError.badRequest('No parked car found for your account');
+  const task = await runSerializable(async (tx) => {
+    const slot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
+    if (!slot) throw ApiError.badRequest('No parked car found for your account');
 
-  const existing = await prisma.parkingTask.findFirst({
-    where: { slotId: slot.id, type: 'retrieve', status: { not: 'completed' } },
-  });
-  if (existing) throw ApiError.conflict('Retrieval has already been requested for this car');
+    const existing = await tx.parkingTask.findFirst({
+      where: { slotId: slot.id, type: 'retrieve', status: { not: 'completed' } },
+    });
+    if (existing) throw ApiError.conflict('Retrieval has already been requested for this car');
 
-  const task = await prisma.parkingTask.create({
-    data: {
-      type: 'retrieve',
-      doctorId,
-      carNumber: slot.carNumber ?? '',
-      slotId: slot.id,
-      status: 'requested',
-      requestedAt: new Date(),
-      eta: eta ?? null,
-      destinationLat: destinationLat ?? null,
-      destinationLng: destinationLng ?? null,
-    },
-    include: taskInclude,
+    return tx.parkingTask.create({
+      data: {
+        type: 'retrieve',
+        doctorId,
+        carNumber: slot.carNumber ?? '',
+        slotId: slot.id,
+        status: 'requested',
+        requestedAt: new Date(),
+        eta: eta ?? null,
+        destinationLat: destinationLat ?? null,
+        destinationLng: destinationLng ?? null,
+      },
+      include: taskInclude,
+    });
   });
   cache.invalidate('tasks:');
   return task;
@@ -111,7 +131,7 @@ async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng 
 // Valet: assigns an available driver to a requested (or already-assigned,
 // e.g. reassigning) task.
 async function assignDriver(taskId, driverId) {
-  const task = await prisma.$transaction(async (tx) => {
+  const task = await runSerializable(async (tx) => {
     const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!existing) throw ApiError.notFound('Task not found');
     assertTransition(existing, ['requested', 'assigned'], 'assign a driver');
