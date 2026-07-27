@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const compression = require('compression');
 const {rateLimit, ipKeyGenerator} = require('express-rate-limit');
 
 const { NODE_ENV, CORS_ORIGIN, LOG_LEVEL } = require('./config/env');
@@ -15,7 +16,11 @@ app.use(helmet());
 app.use(cors({
   origin: CORS_ORIGIN === '*' ? '*' : CORS_ORIGIN.split(',').map(o => o.trim()),
 }));
-app.use(express.json());
+// Every response here is JSON or HTML polled repeatedly by mobile clients on
+// cellular connections — gzip cuts payload size (and radio time) for
+// essentially free CPU cost at this request volume.
+app.use(compression());
+app.use(express.json({ limit: '256kb' }));
 app.use(morgan(NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // Baseline abuse guard for the whole API — generous enough that the app's

@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
+const { invalidateUserCache } = require('../middleware/auth.middleware');
 
 // What staff actually type to log in — no employee codes to remember. Admin
 // accounts are exempt (their `name` IS the literal login, e.g. "Admin1") since
@@ -140,7 +141,9 @@ async function updateUser(id, { name, role, department, cardCode, phone, carNumb
       }
     }
 
-    return tx.user.findUnique({ where: { id }, include: { driver: true } });
+    const updated = await tx.user.findUnique({ where: { id }, include: { driver: true } });
+    invalidateUserCache(id);
+    return updated;
   });
 }
 
@@ -151,6 +154,7 @@ async function resetPassword(id, newPassword) {
 
   const passwordHash = await bcrypt.hash(newPassword, 10);
   await prisma.user.update({ where: { id }, data: { password: passwordHash } });
+  invalidateUserCache(id);
 }
 
 // Admin: remove an account entirely. Driver profile and attendance history
@@ -165,6 +169,7 @@ async function deleteUser(id) {
 
   try {
     await prisma.user.delete({ where: { id } });
+    invalidateUserCache(id);
   } catch (err) {
     if (err.code === 'P2003') {
       throw ApiError.conflict(
@@ -178,7 +183,7 @@ async function deleteUser(id) {
 // Self-service — a user updating their own car number/phone, not an admin
 // editing someone else's account (see updateUser for that, admin-only).
 async function updateOwnProfile(id, { carNumber, phone }) {
-  return prisma.user.update({
+  const updated = await prisma.user.update({
     where: { id },
     data: {
       ...(carNumber !== undefined && { carNumber: carNumber?.trim().toUpperCase() || null }),
@@ -186,6 +191,8 @@ async function updateOwnProfile(id, { carNumber, phone }) {
     },
     include: { driver: true },
   });
+  invalidateUserCache(id);
+  return updated;
 }
 
 module.exports = { findByCardCode, listUsers, createUser, updateUser, resetPassword, deleteUser, updateOwnProfile };

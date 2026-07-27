@@ -123,6 +123,10 @@ model ParkingSlot {
 
   @@index([block])
   @@index([status])
+  // Matches task.service.js requestRetrieval's exact filter (an occupied
+  // slot belonging to one doctor) — without this it's a full table scan
+  // filtered by the (indexed but low-selectivity) status column alone.
+  @@index([doctorId, status])
   @@map("parking_slots")
 }
 
@@ -177,6 +181,10 @@ model ParkingTask {
   @@index([driverId])
   @@index([status])
   @@index([createdAt])
+  // requestRetrieval checks for an existing non-completed retrieve task on
+  // this exact slot before creating a new one — without this it's a full
+  // table scan of task history on every retrieval request.
+  @@index([slotId])
   @@map("parking_tasks")
 }
 
