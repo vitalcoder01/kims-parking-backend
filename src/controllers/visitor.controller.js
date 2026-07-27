@@ -1,6 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const visitorService = require('../services/visitor.service');
+const notificationService = require('../services/notification.service');
 const { serializeVisitor, serializeVisitorPublic } = require('../utils/serialize');
 
 const list = asyncHandler(async (req, res) => {
@@ -40,9 +41,13 @@ const park = asyncHandler(async (req, res) => {
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
-const requestRetrieval = asyncHandler(async (req, res) => {
+// Valet: assign (or reassign) a driver to a retrieval — either one they're
+// raising themselves or one the visitor already flagged from the tracking
+// page (selfRequestRetrieval below).
+const assignRetrievalDriver = asyncHandler(async (req, res) => {
   const { driverId } = req.body;
-  const visitor = await visitorService.requestRetrieval(req.params.id, driverId);
+  if (!driverId) throw ApiError.badRequest('driverId is required');
+  const visitor = await visitorService.assignRetrievalDriver(req.params.id, driverId);
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
@@ -58,4 +63,18 @@ const track = asyncHandler(async (req, res) => {
   res.json({ visitor: serializeVisitorPublic(visitor) });
 });
 
-module.exports = { list, create, update, assignDriver, park, requestRetrieval, retrieve, track };
+// Public (no auth) — the tracking page's "Request My Car" button. Only
+// flags the request; a valet still has to assign a driver (assignRetrievalDriver
+// above), same division of labor as the doctor/staff retrieval flow.
+const selfRequestRetrieval = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.requestRetrieval(req.params.id);
+  await notificationService.push({
+    targetRole: 'valet',
+    title: '🚗 Visitor Ready to Leave',
+    body: `${visitor.name} requested their car (${visitor.carNumber}) back from slot ${visitor.slotId ?? ''}.`,
+    type: 'info',
+  }).catch(() => {});
+  res.json({ visitor: serializeVisitorPublic(visitor) });
+});
+
+module.exports = { list, create, update, assignDriver, park, assignRetrievalDriver, retrieve, track, selfRequestRetrieval };

@@ -20,7 +20,13 @@ function renderTrackPage(id) {
     width: 100%; max-width: 420px; background: #fff; border-radius: 20px; padding: 28px 24px;
     box-shadow: 0 20px 50px rgba(0,0,0,0.25);
   }
-  .brand { font-size: 13px; font-weight: 700; letter-spacing: 1px; color: #0f6e5a; margin-bottom: 4px; }
+  .brandRow { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .brand { font-size: 13px; font-weight: 700; letter-spacing: 1px; color: #0f6e5a; }
+  .refreshBtn {
+    border: none; background: none; color: #0f6e5a; font-size: 18px; line-height: 1; cursor: pointer;
+    padding: 4px; border-radius: 8px; transition: transform .3s;
+  }
+  .refreshBtn:active { transform: rotate(180deg); }
   h1 { font-size: 20px; margin: 0 0 20px; color: #111; }
   .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 14px; }
   .row:last-of-type { border-bottom: none; }
@@ -36,12 +42,25 @@ function renderTrackPage(id) {
   .step-label { font-size: 10px; color: #777; text-align: center; font-weight: 600; }
   .msg { margin-top: 20px; text-align: center; font-size: 13px; color: #555; line-height: 1.5; }
   .error { text-align: center; color: #c0392b; font-size: 14px; }
-  .footer { margin-top: 20px; text-align: center; font-size: 11px; color: #aaa; }
+  .actionBtn {
+    display: block; width: 100%; margin-top: 18px; border: none; border-radius: 14px; padding: 15px;
+    font-size: 14px; font-weight: 800; color: #fff; background: #0f6e5a; cursor: pointer;
+  }
+  .actionBtn:disabled { opacity: 0.5; cursor: default; }
+  .actionNote { margin-top: 10px; text-align: center; font-size: 12px; color: #c0392b; min-height: 14px; }
+  .confirmBanner {
+    margin-top: 18px; text-align: center; font-size: 13px; font-weight: 700; color: #0f6e5a;
+    background: #0f6e5a14; border-radius: 12px; padding: 12px;
+  }
+  .footer { margin-top: 18px; text-align: center; font-size: 11px; color: #aaa; }
 </style>
 </head>
 <body>
   <div class="card" id="card">
-    <div class="brand">🏥 KIMS HOSPITAL PARKING</div>
+    <div class="brandRow">
+      <div class="brand">🏥 KIMS HOSPITAL PARKING</div>
+      <button class="refreshBtn" id="refreshBtn" title="Refresh now" aria-label="Refresh now">↻</button>
+    </div>
     <h1>Track My Car</h1>
     <div id="content">Loading…</div>
   </div>
@@ -54,11 +73,24 @@ function renderTrackPage(id) {
       { key: 'retrieved', label: 'Ready' },
     ];
 
+    let requesting = false;
+    let lastUpdated = null;
+
     function stepIndex(v) {
       if (v.status === 'retrieved') return 3;
       if (v.status === 'parked' && v.retrievalRequested) return 2;
       if (v.status === 'parked') return 1;
       return 0;
+    }
+
+    function escapeHtml(str) {
+      return String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function timeAgo() {
+      if (!lastUpdated) return '';
+      const secs = Math.max(0, Math.round((Date.now() - lastUpdated) / 1000));
+      return secs < 2 ? 'just now' : secs + 's ago';
     }
 
     function render(v) {
@@ -72,10 +104,22 @@ function renderTrackPage(id) {
       let statusMsg;
       if (v.status === 'pending' && !v.driverName) statusMsg = 'Your car has been received by our valet team. A driver is being assigned.';
       else if (v.status === 'pending' && v.driverName) statusMsg = v.driverName + ' is on the way to park your car.';
-      else if (v.status === 'parked' && !v.retrievalRequested) statusMsg = 'Your car is safely parked' + (v.slotId ? ' at slot ' + v.slotId : '') + '. Contact the valet desk when you are ready to leave.';
-      else if (v.status === 'parked' && v.retrievalRequested) statusMsg = 'Retrieval requested — your car is on its way to the valet counter.';
+      else if (v.status === 'parked' && !v.retrievalRequested) statusMsg = 'Your car is safely parked' + (v.slotId ? ' at slot ' + v.slotId : '') + '. Ready to leave? Tap the button below.';
+      else if (v.status === 'parked' && v.retrievalRequested && v.driverName) statusMsg = v.driverName + ' is bringing your car to the valet counter.';
+      else if (v.status === 'parked' && v.retrievalRequested) statusMsg = 'Request received — waiting for a driver to be assigned to bring your car back.';
       else if (v.status === 'retrieved') statusMsg = 'Your car has been retrieved. Thank you for visiting KIMS Hospital!';
       else statusMsg = '';
+
+      let actionHtml = '';
+      if (v.status === 'parked' && !v.retrievalRequested) {
+        actionHtml =
+          '<button class="actionBtn" id="requestBtn"' + (requesting ? ' disabled' : '') + '>' +
+          (requesting ? 'Requesting…' : '🚗 Request My Car') +
+          '</button>' +
+          '<div class="actionNote" id="actionNote"></div>';
+      } else if (v.status === 'parked' && v.retrievalRequested) {
+        actionHtml = '<div class="confirmBanner">✓ Your car has been requested — the valet team has been notified.</div>';
+      }
 
       document.getElementById('content').innerHTML =
         '<div class="row"><span class="label">Name</span><span class="value">' + escapeHtml(v.name) + '</span></div>' +
@@ -84,11 +128,34 @@ function renderTrackPage(id) {
         (v.driverName ? '<div class="row"><span class="label">Driver</span><span class="value">' + escapeHtml(v.driverName) + '</span></div>' : '') +
         '<div class="steps"><div class="fill" style="width:' + fillPct + '%"></div>' + dots + '</div>' +
         '<div class="msg">' + statusMsg + '</div>' +
-        '<div class="footer">Auto-refreshing · KIMS Smart Parking</div>';
+        actionHtml +
+        '<div class="footer" id="footer">Auto-refreshing · Updated ' + timeAgo() + ' · KIMS Smart Parking</div>';
+
+      const btn = document.getElementById('requestBtn');
+      if (btn) btn.addEventListener('click', requestMyCar);
     }
 
-    function escapeHtml(str) {
-      return String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    async function requestMyCar() {
+      if (requesting) return;
+      requesting = true;
+      const btn = document.getElementById('requestBtn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Requesting…'; }
+      try {
+        const res = await fetch('/api/track/' + encodeURIComponent(ID) + '/request-retrieval', { method: 'PATCH' });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body?.error?.message || 'Could not request your car right now.');
+        }
+        const { visitor } = await res.json();
+        requesting = false;
+        lastUpdated = Date.now();
+        render(visitor);
+      } catch (e) {
+        requesting = false;
+        const note = document.getElementById('actionNote');
+        if (note) note.textContent = e.message || 'Something went wrong — please try again.';
+        if (btn) { btn.disabled = false; btn.textContent = '🚗 Request My Car'; }
+      }
     }
 
     async function poll() {
@@ -96,14 +163,22 @@ function renderTrackPage(id) {
         const res = await fetch('/api/track/' + encodeURIComponent(ID));
         if (!res.ok) throw new Error('not found');
         const { visitor } = await res.json();
-        render(visitor);
+        lastUpdated = Date.now();
+        if (!requesting) render(visitor);
       } catch (e) {
-        document.getElementById('content').innerHTML = '<div class="error">This tracking link is invalid or has expired.</div>';
+        if (!requesting) document.getElementById('content').innerHTML = '<div class="error">This tracking link is invalid or has expired.</div>';
       }
     }
 
+    document.getElementById('refreshBtn').addEventListener('click', poll);
     poll();
     setInterval(poll, 4000);
+    // Keeps the "Updated Xs ago" footer ticking between polls without
+    // waiting for the next full re-render.
+    setInterval(() => {
+      const footer = document.getElementById('footer');
+      if (footer && lastUpdated) footer.textContent = 'Auto-refreshing · Updated ' + timeAgo() + ' · KIMS Smart Parking';
+    }, 1000);
   </script>
 </body>
 </html>`;

@@ -123,26 +123,65 @@ async function markParked(visitorId, slotId) {
   return visitor;
 }
 
-// Valet: visitor is ready to leave — flags the parked car for pickup and, if
-// a driver is given, assigns them immediately (mirrors task assignDriver).
-async function requestRetrieval(visitorId, driverId) {
+// Visitor (public, self-service from the tracking page): flags the parked
+// car for pickup. Deliberately idempotent — a double-tap or a page reload
+// after already requesting just returns the current state instead of
+// erroring, since from the visitor's side "I asked for my car" is true
+// either way. Never touches driverId/driver status itself — assigning an
+// actual driver to come get it is still the valet's job (assignRetrievalDriver
+// below), same as when the valet raises the request themselves.
+async function requestRetrieval(visitorId) {
+  const existing = await prisma.visitor.findUnique({ where: { id: visitorId } });
+  if (!existing) throw ApiError.notFound('Visitor not found');
+  assertTransition(existing, ['parked'], 'request retrieval');
+
+  if (existing.retrievalRequested) {
+    return prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
+  }
+
+  const updated = await prisma.visitor.update({
+    where: { id: visitorId },
+    data: { retrievalRequested: true, trackingProgress: 0.75 },
+    include: visitorInclude,
+  });
+  cache.invalidate('visitors:');
+  return updated;
+}
+
+// Valet: assign (or reassign) a driver to bring a requested car back. Works
+// whether the request came from the valet's own "Request Retrieval" action
+// or the visitor's own self-service tap on the tracking page — both just
+// flag retrievalRequested; this is the one place a driver actually gets
+// sent to do it, so it also flags the request itself if nobody has yet.
+//
+// `driverId` on Visitor is reused from the park leg and isn't cleared until
+// the retrieval completes, so it alone can't tell us whether someone is
+// *currently* out on this retrieval — checking the driver's own
+// currentTaskId against this visitor is what actually disambiguates that.
+async function assignRetrievalDriver(visitorId, driverId) {
   const visitor = await prisma.$transaction(async (tx) => {
     const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
     if (!existing) throw ApiError.notFound('Visitor not found');
-    assertTransition(existing, ['parked'], 'request retrieval');
-    if (existing.retrievalRequested) throw ApiError.conflict('Retrieval has already been requested for this car');
+    assertTransition(existing, ['parked'], 'assign a retrieval driver');
 
-    const data = { retrievalRequested: true, trackingProgress: 0.75 };
-
-    if (driverId) {
-      const driver = await tx.driver.findUnique({ where: { id: driverId } });
-      if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-      if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
-      data.driverId = driverId;
-      await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
+    if (existing.driverId) {
+      const currentDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
+      if (currentDriver?.status === 'busy' && currentDriver.currentTaskId === visitorId) {
+        throw ApiError.conflict('A driver is already assigned to retrieve this car');
+      }
     }
 
-    return tx.visitor.update({ where: { id: visitorId }, data, include: visitorInclude });
+    const driver = await tx.driver.findUnique({ where: { id: driverId } });
+    if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
+    if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
+
+    await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
+
+    return tx.visitor.update({
+      where: { id: visitorId },
+      data: { driverId, retrievalRequested: true, trackingProgress: 0.85 },
+      include: visitorInclude,
+    });
   });
   cache.invalidate('visitors:');
   cache.invalidate('drivers:');
@@ -192,5 +231,5 @@ async function trackById(id) {
 
 module.exports = {
   listVisitors, getVisitor, createVisitor, updateVisitor,
-  assignDriver, markParked, requestRetrieval, markRetrieved, trackById,
+  assignDriver, markParked, requestRetrieval, assignRetrievalDriver, markRetrieved, trackById,
 };

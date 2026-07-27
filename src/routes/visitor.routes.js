@@ -11,7 +11,7 @@ router.post('/', requireRole('valet', 'admin'), ctrl.create);
 router.patch('/:id', requireRole('valet', 'driver', 'admin'), ctrl.update);
 router.patch('/:id/assign', requireRole('valet', 'admin'), ctrl.assignDriver);
 router.patch('/:id/park', requireRole('driver', 'admin'), ctrl.park);
-router.patch('/:id/request-retrieval', requireRole('valet', 'admin'), ctrl.requestRetrieval);
+router.patch('/:id/assign-retrieval', requireRole('valet', 'admin'), ctrl.assignRetrievalDriver);
 router.patch('/:id/retrieve', requireRole('driver', 'admin'), ctrl.retrieve);
 
 module.exports = router;
