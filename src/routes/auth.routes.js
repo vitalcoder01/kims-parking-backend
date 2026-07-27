@@ -6,7 +6,7 @@ const { requireAuth } = require('../middleware/auth.middleware');
 const router = express.Router();
 
 // Brute-force guard: real credentials only need a handful of attempts. Keyed
-// on the employeeId being attempted (not IP) — many staff share one hospital
+// on the loginName being attempted (not IP) — many staff share one hospital
 // NAT gateway, so an IP-keyed limit would lock out everyone behind it during
 // a shift change; this instead only throttles repeated guesses against one
 // specific account.
@@ -15,7 +15,7 @@ const loginLimiter = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: req => (req.body?.employeeId ? String(req.body.employeeId).toUpperCase() : ipKeyGenerator(req.ip)),
+  keyGenerator: req => (req.body?.loginName ? String(req.body.loginName).toLowerCase() : ipKeyGenerator(req.ip)),
   message: { error: { message: 'Too many login attempts. Please wait a few minutes and try again.' } },
 });
 

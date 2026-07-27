@@ -4,10 +4,10 @@ const authService = require('../services/auth.service');
 const { serializeUser } = require('../utils/serialize');
 
 const login = asyncHandler(async (req, res) => {
-  const { employeeId, password } = req.body;
-  if (!employeeId || !password) throw ApiError.badRequest('employeeId and password are required');
+  const { loginName, password } = req.body;
+  if (!loginName || !password) throw ApiError.badRequest('loginName and password are required');
 
-  const { token, user } = await authService.login(employeeId, password);
+  const { token, user } = await authService.login(loginName, password);
   res.json({ token, user: serializeUser(user) });
 });
 

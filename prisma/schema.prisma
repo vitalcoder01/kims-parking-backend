@@ -60,7 +60,12 @@ enum NotificationType {
 
 model User {
   id         String   @id @default(cuid())
-  employeeId String   @unique
+  employeeId String   @unique // internal admin-assigned ID — no longer used to log in
+  // What staff actually type to log in — auto-derived from role + name
+  // ("Dr. <name>" for doctors, "Valet <name>" for valets, "Driver <name>"
+  // for drivers, plain name for staff/admin) whenever an account is created
+  // or renamed, so nobody has to remember an employee code.
+  loginName  String   @unique
   password   String // bcrypt hash
   name       String
   role       Role

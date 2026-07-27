@@ -8,18 +8,18 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 const USERS = [
-  { employeeId: 'DOC001', name: 'Dr. Arun Kumar', role: 'doctor', department: 'Cardiology', cardCode: '472' },
-  { employeeId: 'DOC002', name: 'Dr. Priya Sharma', role: 'doctor', department: 'Neurology', cardCode: '815' },
-  { employeeId: 'STF001', name: 'Nurse Kavitha', role: 'staff', department: 'ICU', cardCode: '239' },
-  { employeeId: 'STF002', name: 'Admin Suresh', role: 'staff', department: 'Reception', cardCode: '561' },
-  { employeeId: 'VAL001', name: 'Valet Ramesh', role: 'valet' },
-  { employeeId: 'VAL002', name: 'Valet Deepa', role: 'valet' },
-  { employeeId: 'DRV001', name: 'Ravi Kumar', role: 'driver', phone: '9876543210' },
-  { employeeId: 'DRV002', name: 'Suresh Babu', role: 'driver', phone: '9876543211' },
-  { employeeId: 'DRV003', name: 'Anand Raj', role: 'driver', phone: '9876543212' },
-  { employeeId: 'DRV004', name: 'Karthik M', role: 'driver', phone: '9876543213' },
-  { employeeId: 'DRV005', name: 'Vijay S', role: 'driver', phone: '9876543214' },
-  { employeeId: 'ADM001', name: 'Admin Manager', role: 'admin' },
+  { employeeId: 'DOC001', name: 'Dr. Arun Kumar', loginName: 'Dr. Arun Kumar', role: 'doctor', department: 'Cardiology', cardCode: '472' },
+  { employeeId: 'DOC002', name: 'Dr. Priya Sharma', loginName: 'Dr. Priya Sharma', role: 'doctor', department: 'Neurology', cardCode: '815' },
+  { employeeId: 'STF001', name: 'Nurse Kavitha', loginName: 'Nurse Kavitha', role: 'staff', department: 'ICU', cardCode: '239' },
+  { employeeId: 'STF002', name: 'Admin Suresh', loginName: 'Admin Suresh', role: 'staff', department: 'Reception', cardCode: '561' },
+  { employeeId: 'VAL001', name: 'Ramesh', loginName: 'Valet Ramesh', role: 'valet' },
+  { employeeId: 'VAL002', name: 'Deepa', loginName: 'Valet Deepa', role: 'valet' },
+  { employeeId: 'DRV001', name: 'Ravi Kumar', loginName: 'Driver Ravi Kumar', role: 'driver', phone: '9876543210' },
+  { employeeId: 'DRV002', name: 'Suresh Babu', loginName: 'Driver Suresh Babu', role: 'driver', phone: '9876543211' },
+  { employeeId: 'DRV003', name: 'Anand Raj', loginName: 'Driver Anand Raj', role: 'driver', phone: '9876543212' },
+  { employeeId: 'DRV004', name: 'Karthik M', loginName: 'Driver Karthik M', role: 'driver', phone: '9876543213' },
+  { employeeId: 'DRV005', name: 'Vijay S', loginName: 'Driver Vijay S', role: 'driver', phone: '9876543214' },
+  { employeeId: 'ADM001', name: 'Admin Manager', loginName: 'Admin Manager', role: 'admin' },
 ];
 
 // Driver-role users get a status; Karthik starts busy, Vijay starts off duty
@@ -74,7 +74,7 @@ async function main() {
   }
 
   console.log('Seed complete.');
-  console.log('Demo login: any employeeId above with password "1234" (e.g. DOC001 / 1234, VAL001 / 1234, DRV001 / 1234, ADM001 / 1234).');
+  console.log('Demo login: any loginName above with password "1234" (e.g. "Dr. Arun Kumar" / 1234, "Valet Ramesh" / 1234, "Driver Ravi Kumar" / 1234, "Admin Manager" / 1234).');
 }
 
 main()

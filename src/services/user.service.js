@@ -2,6 +2,26 @@ const bcrypt = require('bcryptjs');
 const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
 
+// What staff actually type to log in — no employee codes to remember. Admin
+// accounts are exempt (their `name` IS the literal login, e.g. "Admin1") since
+// they're master-control logins, not people wearing a role badge.
+const LOGIN_PREFIX = { doctor: 'Dr. ', staff: '', valet: 'Valet ', driver: 'Driver ', admin: '' };
+
+async function generateUniqueLoginName(tx, role, name, excludeUserId) {
+  const base = `${LOGIN_PREFIX[role] ?? ''}${name.trim()}`.trim();
+  let candidate = base;
+  let n = 2;
+  // Case-insensitive so "Dr. Aditya" and "dr. aditya" can't collide, and
+  // Postgres text uniqueness is case-sensitive by default.
+  while (await tx.user.findFirst({
+    where: { loginName: { equals: candidate, mode: 'insensitive' }, ...(excludeUserId && { id: { not: excludeUserId } }) },
+  })) {
+    candidate = `${base} ${n}`;
+    n += 1;
+  }
+  return candidate;
+}
+
 // Used by the valet "Collect Key" flow to identify a doctor/staff member by
 // the 3-digit code shown on their virtual valet card.
 async function findByCardCode(cardCode) {
@@ -42,9 +62,11 @@ async function createUser({ employeeId, name, role, password, department, cardCo
   const passwordHash = await bcrypt.hash(password, 10);
 
   return prisma.$transaction(async (tx) => {
+    const loginName = await generateUniqueLoginName(tx, role, name);
     const user = await tx.user.create({
       data: {
         employeeId: id,
+        loginName,
         password: passwordHash,
         name: name.trim(),
         role,
@@ -79,11 +101,18 @@ async function updateUser(id, { name, role, department, cardCode, phone, carNumb
   }
 
   return prisma.$transaction(async (tx) => {
+    const nameChanged = name !== undefined && name.trim() !== existing.name;
+    const roleChanged = role !== undefined && role !== existing.role;
+    const loginName = (nameChanged || roleChanged)
+      ? await generateUniqueLoginName(tx, role ?? existing.role, name ?? existing.name, id)
+      : undefined;
+
     await tx.user.update({
       where: { id },
       data: {
         ...(name !== undefined && { name: name.trim() }),
         ...(role !== undefined && { role }),
+        ...(loginName !== undefined && { loginName }),
         ...(department !== undefined && { department: department?.trim() || null }),
         ...(cardCode !== undefined && { cardCode: cardCode || null }),
         ...(phone !== undefined && { phone: phone?.trim() || null }),
