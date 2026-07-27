@@ -22,6 +22,7 @@ router.use('/visitors', require('./visitor.routes'));
 router.use('/notifications', require('./notification.routes'));
 router.use('/attendance', require('./attendance.routes'));
 router.use('/admin', require('./admin.routes'));
+router.use('/track', require('./track.routes'));
 
 router.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 

@@ -68,9 +68,27 @@ function serializeVisitor(v) {
     carNumber: v.carNumber,
     mobile: v.mobile,
     slotId: v.slotId ?? undefined,
-    driverName: v.driverName ?? undefined,
+    driverId: v.driverId ?? undefined,
+    driverName: v.driver?.user?.name ?? v.driverName ?? undefined,
     status: v.status,
+    retrievalRequested: v.retrievalRequested,
     token: v.token,
+    trackingProgress: v.trackingProgress ?? undefined,
+    createdAt: v.createdAt,
+  };
+}
+
+// Public tracking page — deliberately excludes mobile number and token;
+// this is reachable by anyone with the link, not just the visitor.
+function serializeVisitorPublic(v) {
+  if (!v) return null;
+  return {
+    name: v.name,
+    carNumber: v.carNumber,
+    slotId: v.slotId ?? undefined,
+    driverName: v.driver?.user?.name ?? v.driverName ?? undefined,
+    status: v.status,
+    retrievalRequested: v.retrievalRequested,
     trackingProgress: v.trackingProgress ?? undefined,
     createdAt: v.createdAt,
   };
@@ -96,5 +114,6 @@ module.exports = {
   serializeSlot,
   serializeDriver,
   serializeVisitor,
+  serializeVisitorPublic,
   serializeNotification,
 };

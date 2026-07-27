@@ -6,6 +6,7 @@ const {rateLimit, ipKeyGenerator} = require('express-rate-limit');
 
 const { NODE_ENV, CORS_ORIGIN, LOG_LEVEL } = require('./config/env');
 const routes = require('./routes');
+const { renderTrackPage } = require('./views/trackPage');
 const { notFoundHandler, errorHandler } = require('./middleware/error.middleware');
 
 const app = express();
@@ -35,6 +36,17 @@ app.use('/api', rateLimit({
 
 app.get('/', (req, res) => {
   res.json({ service: 'kims-parking-backend', env: NODE_ENV, logLevel: LOG_LEVEL });
+});
+
+// Public visitor tracking page — plain HTML, no auth, opened straight from
+// the WhatsApp link. Lives outside /api since it's a page, not a JSON route;
+// the page itself polls /api/track/:id for data.
+app.get('/track/:id', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  // helmet's default CSP (script-src/style-src 'self') would block this
+  // page's inline <script>/<style> — relax just for this one HTML response.
+  res.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'");
+  res.send(renderTrackPage(req.params.id));
 });
 
 app.use('/api', routes);

@@ -99,6 +99,7 @@ model Driver {
   updatedAt     DateTime     @updatedAt
 
   tasksAsDriver ParkingTask[] @relation("DriverTasks")
+  visitorsAsDriver Visitor[] @relation("VisitorDriver")
 
   @@index([status])
   @@map("drivers")
@@ -185,9 +186,16 @@ model Visitor {
   carNumber  String
   mobile     String
   slotId     String?
+  driverId   String?
+  driver     Driver?       @relation("VisitorDriver", fields: [driverId], references: [id])
   driverName String?
   status     VisitorStatus @default(pending)
   token      String
+
+  // Set once a parked visitor's car has been asked back for, cleared again
+  // on retrieve — lets the valet/driver UI show "pickup requested" without
+  // a dedicated status enum value (status stays 'parked' the whole time).
+  retrievalRequested Boolean @default(false)
 
   trackingProgress Float?
   createdAt        DateTime @default(now())
@@ -195,6 +203,7 @@ model Visitor {
 
   @@index([status])
   @@index([createdAt])
+  @@index([driverId])
   @@map("visitors")
 }
 
