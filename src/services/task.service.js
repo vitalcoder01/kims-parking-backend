@@ -1,6 +1,21 @@
 const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
 const cache = require('../utils/responseCache');
+const realtime = require('../realtime');
+const watchdog = require('./acceptWatchdog');
+const { serializeTask, serializeSlot } = require('../utils/serialize');
+
+// Realtime deltas: every mutation below emits the changed entity itself so
+// connected apps patch just that record — nobody refetches lists on events.
+function emitTask(task) {
+  realtime.emitAll('task:upsert', serializeTask(task));
+}
+function emitDriverPatch(id, status, currentTaskId) {
+  realtime.emitAll('driver:patch', { id, status, currentTaskId: currentTaskId ?? undefined });
+}
+function emitSlot(slot) {
+  realtime.emitAll('slot:patch', serializeSlot(slot));
+}
 
 // Read Committed (Postgres/Prisma's default) lets two concurrent
 // transactions both read "not taken yet" before either writes — e.g. two
@@ -93,6 +108,7 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
     include: taskInclude,
   });
   cache.invalidate('tasks:');
+  emitTask(task);
   return task;
 }
 
@@ -125,6 +141,7 @@ async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng 
     });
   });
   cache.invalidate('tasks:');
+  emitTask(task);
   return task;
 }
 
@@ -142,7 +159,8 @@ async function assignDriver(taskId, driverId) {
 
     const updated = await tx.parkingTask.update({
       where: { id: taskId },
-      data: { driverId, status: 'assigned', assignedAt: new Date() },
+      // A (re)assignment restarts the accept handshake from scratch.
+      data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null },
       include: taskInclude,
     });
 
@@ -155,7 +173,65 @@ async function assignDriver(taskId, driverId) {
   });
   cache.invalidate('tasks:');
   cache.invalidate('drivers:');
+  emitTask(task);
+  emitDriverPatch(driverId, 'busy', taskId);
+  // Countdown for the driver to accept — on expiry the valet is prompted
+  // to reassign (see acceptWatchdog.js).
+  await watchdog.arm('task', taskId, driverId);
   return task;
+}
+
+// Driver: explicit "I've got it" on the assignment alert. Stops the accept
+// watchdog; the task stays 'assigned' (the valet's "Mark Key Handed to
+// Driver" step is what moves it forward) but now shows an accepted driver.
+async function acceptTask(taskId, driverId) {
+  const task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
+  if (!task) throw ApiError.notFound('Task not found');
+  if (task.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this task');
+  assertTransition(task, ['assigned'], 'accept');
+  if (task.acceptedAt) return task;
+
+  watchdog.disarm('task', taskId);
+  const updated = await prisma.parkingTask.update({
+    where: { id: taskId },
+    data: { acceptedAt: new Date() },
+    include: taskInclude,
+  });
+  cache.invalidate('tasks:');
+  emitTask(updated);
+  return updated;
+}
+
+// Driver: declined the assignment — same rollback the accept timeout does,
+// just immediate: free the driver, put the job back in the valet's court,
+// and prompt them to reassign.
+async function rejectTask(taskId, driverId) {
+  watchdog.disarm('task', taskId);
+  const result = await runSerializable(async (tx) => {
+    const task = await tx.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
+    if (!task) throw ApiError.notFound('Task not found');
+    if (task.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this task');
+    assertTransition(task, ['assigned'], 'reject');
+
+    const driverName = task.driver?.user?.name ?? 'Driver';
+    const updated = await tx.parkingTask.update({
+      where: { id: taskId },
+      data: { driverId: null, acceptedAt: null, ...(task.type === 'retrieve' && { status: 'requested' }) },
+      include: taskInclude,
+    });
+    await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
+    return { updated, driverName };
+  });
+  cache.invalidate('tasks:');
+  cache.invalidate('drivers:');
+  emitTask(result.updated);
+  emitDriverPatch(driverId, 'available', null);
+  realtime.emitToRoles(['valet', 'admin'], 'task:needs-reassign', {
+    task: serializeTask(result.updated),
+    driverName: result.driverName,
+    rejected: true,
+  });
+  return result.updated;
 }
 
 // Valet: "Mark Key Handed to Driver" — park tasks only (retrieve has no key
@@ -173,6 +249,9 @@ async function markKeyCollected(taskId) {
     include: taskInclude,
   });
   cache.invalidate('tasks:');
+  // Key handed over means the assignment is definitively taken.
+  watchdog.disarm('task', taskId);
+  emitTask(updated);
   return updated;
 }
 
@@ -191,12 +270,14 @@ async function markInTransit(taskId) {
     include: taskInclude,
   });
   cache.invalidate('tasks:');
+  watchdog.disarm('task', taskId);
+  emitTask(updated);
   return updated;
 }
 
 // Driver: "Mark Parked" — occupies the slot, frees the driver, completes the task.
 async function markParked(taskId, slotId) {
-  const task = await prisma.$transaction(async (tx) => {
+  const { task, slot } = await prisma.$transaction(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!task) throw ApiError.notFound('Task not found');
     if (task.type !== 'park') throw ApiError.conflict('Only park tasks can be marked parked');
@@ -206,7 +287,7 @@ async function markParked(taskId, slotId) {
     if (!slot) throw ApiError.badRequest(`Slot ${slotId} does not exist`);
     if (slot.status !== 'free') throw ApiError.conflict(`Slot ${slotId} is not free`);
 
-    await tx.parkingSlot.update({
+    const updatedSlot = await tx.parkingSlot.update({
       where: { id: slotId },
       data: {
         status: 'occupied',
@@ -223,25 +304,30 @@ async function markParked(taskId, slotId) {
       });
     }
 
-    return tx.parkingTask.update({
+    const updatedTask = await tx.parkingTask.update({
       where: { id: taskId },
       data: { slotId, status: 'completed', completedAt: new Date(), trackingProgress: 1 },
       include: taskInclude,
     });
+    return { task: updatedTask, slot: updatedSlot };
   });
   cache.invalidate('tasks:');
   cache.invalidate('slots:');
   cache.invalidate('drivers:');
+  emitTask(task);
+  emitSlot(slot);
+  if (task.driverId) emitDriverPatch(task.driverId, 'available', null);
   return task;
 }
 
 // Driver: "Car Delivered to Valet Counter" — frees the slot, frees the driver.
 async function markRetrieved(taskId) {
-  const task = await prisma.$transaction(async (tx) => {
+  const { task, slot } = await prisma.$transaction(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!task) throw ApiError.notFound('Task not found');
     if (task.type !== 'retrieve') throw ApiError.conflict('Only retrieve tasks can be marked retrieved');
     assertTransition(task, ['in_transit'], 'mark retrieved');
+    let freedSlot = null;
 
     // Only free the slot if the car actually sitting there matches this
     // retrieval — slot.taskId still points at the original *park* task (a
@@ -251,7 +337,7 @@ async function markRetrieved(taskId) {
     if (task.slotId) {
       const slot = await tx.parkingSlot.findUnique({ where: { id: task.slotId } });
       if (slot?.status === 'occupied' && slot.carNumber === task.carNumber) {
-        await tx.parkingSlot.update({
+        freedSlot = await tx.parkingSlot.update({
           where: { id: task.slotId },
           data: { status: 'free', taskId: null, carNumber: null, doctorId: null },
         });
@@ -265,16 +351,42 @@ async function markRetrieved(taskId) {
       });
     }
 
-    return tx.parkingTask.update({
+    const updatedTask = await tx.parkingTask.update({
       where: { id: taskId },
-      data: { status: 'completed', completedAt: new Date(), trackingProgress: 1 },
+      // Not completed yet — the valet still has to confirm the doctor/staff
+      // member actually came and took the car (see confirmDelivered below).
+      data: { status: 'delivered', trackingProgress: 0.95 },
       include: taskInclude,
     });
+    return { task: updatedTask, slot: freedSlot };
   });
   cache.invalidate('tasks:');
   cache.invalidate('slots:');
   cache.invalidate('drivers:');
+  emitTask(task);
+  if (slot) emitSlot(slot);
+  if (task.driverId) emitDriverPatch(task.driverId, 'available', null);
   return task;
+}
+
+// Valet: confirms the doctor/staff member actually came and took the car —
+// the only thing that finally closes out a retrieval. Without this explicit
+// step the system would just assume handover happened the instant the
+// driver said the car arrived, with no record either way.
+async function confirmDelivered(taskId) {
+  const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
+  if (!task) throw ApiError.notFound('Task not found');
+  if (task.type !== 'retrieve') throw ApiError.conflict('Only retrieve tasks can be confirmed delivered');
+  assertTransition(task, ['delivered'], 'confirm handed to owner');
+
+  const updated = await prisma.parkingTask.update({
+    where: { id: taskId },
+    data: { status: 'completed', completedAt: new Date(), trackingProgress: 1 },
+    include: taskInclude,
+  });
+  cache.invalidate('tasks:');
+  emitTask(updated);
+  return updated;
 }
 
 // Driver: periodic GPS ping while en route. Ownership is enforced by the
@@ -299,6 +411,7 @@ async function updateLocation(taskId, lat, lng) {
     include: taskInclude,
   });
   cache.invalidate('tasks:');
+  emitTask(updated);
   return updated;
 }
 
@@ -308,9 +421,12 @@ module.exports = {
   createTask,
   requestRetrieval,
   assignDriver,
+  acceptTask,
+  rejectTask,
   markKeyCollected,
   markInTransit,
   markParked,
   markRetrieved,
+  confirmDelivered,
   updateLocation,
 };

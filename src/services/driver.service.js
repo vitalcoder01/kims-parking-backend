@@ -1,6 +1,8 @@
 const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
 const cache = require('../utils/responseCache');
+const realtime = require('../realtime');
+const { serializeDriver } = require('../utils/serialize');
 
 const CACHE_TTL_MS = 2500;
 
@@ -28,6 +30,7 @@ async function setStatus(driverId, status) {
     include: { user: true },
   });
   cache.invalidate('drivers:');
+  realtime.emitAll('driver:patch', serializeDriver(updated));
   return updated;
 }
 

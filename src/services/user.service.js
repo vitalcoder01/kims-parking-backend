@@ -2,6 +2,9 @@ const bcrypt = require('bcryptjs');
 const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
 const { invalidateUserCache } = require('../middleware/auth.middleware');
+const cache = require('../utils/responseCache');
+const realtime = require('../realtime');
+const { serializeTask } = require('../utils/serialize');
 
 // What staff actually type to log in — no employee codes to remember. Admin
 // accounts are exempt (their `name` IS the literal login, e.g. "Admin1") since
@@ -15,7 +18,7 @@ async function generateUniqueLoginName(tx, role, name, excludeUserId) {
   // Case-insensitive so "Dr. Aditya" and "dr. aditya" can't collide, and
   // Postgres text uniqueness is case-sensitive by default.
   while (await tx.user.findFirst({
-    where: { loginName: { equals: candidate, mode: 'insensitive' }, ...(excludeUserId && { id: { not: excludeUserId } }) },
+    where: { username: { equals: candidate, mode: 'insensitive' }, ...(excludeUserId && { id: { not: excludeUserId } }) },
   })) {
     candidate = `${base} ${n}`;
     n += 1;
@@ -63,11 +66,11 @@ async function createUser({ employeeId, name, role, password, department, cardCo
   const passwordHash = await bcrypt.hash(password, 10);
 
   return prisma.$transaction(async (tx) => {
-    const loginName = await generateUniqueLoginName(tx, role, name);
+    const username = await generateUniqueLoginName(tx, role, name);
     const user = await tx.user.create({
       data: {
         employeeId: id,
-        loginName,
+        username,
         password: passwordHash,
         name: name.trim(),
         role,
@@ -104,7 +107,7 @@ async function updateUser(id, { name, role, department, cardCode, phone, carNumb
   return prisma.$transaction(async (tx) => {
     const nameChanged = name !== undefined && name.trim() !== existing.name;
     const roleChanged = role !== undefined && role !== existing.role;
-    const loginName = (nameChanged || roleChanged)
+    const username = (nameChanged || roleChanged)
       ? await generateUniqueLoginName(tx, role ?? existing.role, name ?? existing.name, id)
       : undefined;
 
@@ -113,7 +116,7 @@ async function updateUser(id, { name, role, department, cardCode, phone, carNumb
       data: {
         ...(name !== undefined && { name: name.trim() }),
         ...(role !== undefined && { role }),
-        ...(loginName !== undefined && { loginName }),
+        ...(username !== undefined && { username }),
         ...(department !== undefined && { department: department?.trim() || null }),
         ...(cardCode !== undefined && { cardCode: cardCode || null }),
         ...(phone !== undefined && { phone: phone?.trim() || null }),
@@ -192,6 +195,28 @@ async function updateOwnProfile(id, { carNumber, phone }) {
     include: { driver: true },
   });
   invalidateUserCache(id);
+
+  // A parking task's carNumber is captured at creation time (the valet may
+  // have typed a different plate than whatever's on file) — but once this
+  // person edits their own profile plate, any task of theirs still in
+  // progress should track it too, or the "current session" card would keep
+  // showing a now-stale number with no way to fix it short of the valet
+  // recreating the task.
+  if (carNumber !== undefined && updated.carNumber) {
+    const activeTasks = await prisma.parkingTask.findMany({
+      where: { doctorId: id, status: { not: 'completed' } },
+    });
+    for (const task of activeTasks) {
+      const patched = await prisma.parkingTask.update({
+        where: { id: task.id },
+        data: { carNumber: updated.carNumber },
+        include: { doctor: true, driver: { include: { user: true } } },
+      });
+      realtime.emitAll('task:upsert', serializeTask(patched));
+    }
+    if (activeTasks.length) cache.invalidate('tasks:');
+  }
+
   return updated;
 }
 

@@ -12,6 +12,8 @@ router.post('/users', ctrl.createUser);
 router.patch('/users/:id', ctrl.updateUser);
 router.patch('/users/:id/password', ctrl.resetPassword);
 router.delete('/users/:id', ctrl.deleteUser);
+router.get('/settings', ctrl.getSettings);
+router.patch('/settings', ctrl.updateSettings);
 router.get('/attendance/today', ctrl.attendanceToday);
 router.get('/attendance/monthly', ctrl.attendanceMonthly);
 

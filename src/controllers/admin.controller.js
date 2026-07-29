@@ -1,9 +1,11 @@
 const asyncHandler = require('../utils/asyncHandler');
 const adminService = require('../services/admin.service');
+const settingService = require('../services/setting.service');
 const userService = require('../services/user.service');
 const attendanceService = require('../services/attendance.service');
 const ApiError = require('../utils/ApiError');
 const { serializeUser } = require('../utils/serialize');
+const parseId = require('../utils/parseId');
 
 const ROLES = ['doctor', 'staff', 'valet', 'driver', 'admin'];
 
@@ -37,13 +39,14 @@ const updateUser = asyncHandler(async (req, res) => {
   if (role !== undefined && !ROLES.includes(role)) {
     throw ApiError.badRequest(`role must be one of: ${ROLES.join(', ')}`);
   }
+  const id = parseId(req.params.id);
   // An admin demoting their own only-admin account would lock everyone out
   // of admin tooling with no way back in short of a direct DB edit.
-  if (req.params.id === req.user.id && role !== undefined && role !== 'admin') {
+  if (id === req.user.id && role !== undefined && role !== 'admin') {
     throw ApiError.conflict('You cannot change your own role away from admin');
   }
 
-  const user = await userService.updateUser(req.params.id, { name, role, department, cardCode, phone, carNumber });
+  const user = await userService.updateUser(id, { name, role, department, cardCode, phone, carNumber });
   res.json({ user: serializeUser(user) });
 });
 
@@ -52,15 +55,16 @@ const resetPassword = asyncHandler(async (req, res) => {
   if (!password || password.length < 4) {
     throw ApiError.badRequest('password must be at least 4 characters');
   }
-  await userService.resetPassword(req.params.id, password);
+  await userService.resetPassword(parseId(req.params.id), password);
   res.json({ ok: true });
 });
 
 const deleteUser = asyncHandler(async (req, res) => {
-  if (req.params.id === req.user.id) {
+  const id = parseId(req.params.id);
+  if (id === req.user.id) {
     throw ApiError.conflict('You cannot delete your own account while logged in as it');
   }
-  await userService.deleteUser(req.params.id);
+  await userService.deleteUser(id);
   res.status(204).send();
 });
 
@@ -112,4 +116,21 @@ const attendanceMonthly = asyncHandler(async (req, res) => {
   res.json({ month, users: [...byUser.values()] });
 });
 
-module.exports = { dashboard, listUsers, createUser, updateUser, resetPassword, deleteUser, attendanceToday, attendanceMonthly };
+// Operational settings (e.g. driverAcceptTimeoutSeconds — the window a
+// driver has to accept an assignment before the valet is asked to reassign).
+const getSettings = asyncHandler(async (req, res) => {
+  res.json({ settings: await settingService.getAll() });
+});
+
+const updateSettings = asyncHandler(async (req, res) => {
+  if (!req.body || typeof req.body !== 'object') throw ApiError.badRequest('settings object required');
+  if (req.body.driverAcceptTimeoutSeconds !== undefined) {
+    const n = Number(req.body.driverAcceptTimeoutSeconds);
+    if (!Number.isFinite(n) || n < 10 || n > 600) {
+      throw ApiError.badRequest('driverAcceptTimeoutSeconds must be between 10 and 600');
+    }
+  }
+  res.json({ settings: await settingService.update(req.body) });
+});
+
+module.exports = { dashboard, listUsers, createUser, updateUser, resetPassword, deleteUser, attendanceToday, attendanceMonthly, getSettings, updateSettings };

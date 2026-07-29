@@ -3,15 +3,16 @@ const ApiError = require('../utils/ApiError');
 const taskService = require('../services/task.service');
 const attendanceService = require('../services/attendance.service');
 const { serializeTask } = require('../utils/serialize');
+const parseId = require('../utils/parseId');
 
 const list = asyncHandler(async (req, res) => {
   const { doctorId, driverId, status, type } = req.query;
-  const tasks = await taskService.listTasks({ doctorId, driverId, status, type });
+  const tasks = await taskService.listTasks({ doctorId: parseId(doctorId), driverId: parseId(driverId), status, type });
   res.json({ tasks: tasks.map(serializeTask) });
 });
 
 const get = asyncHandler(async (req, res) => {
-  const task = await taskService.getTask(req.params.id);
+  const task = await taskService.getTask(parseId(req.params.id));
   res.json({ task: serializeTask(task) });
 });
 
@@ -28,9 +29,9 @@ const create = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('Retrieval must be requested by the doctor/staff who owns the car (POST /tasks/request-retrieval)');
   }
 
-  const task = await taskService.createTask({ type, doctorId, carNumber, slotId, destinationLat, destinationLng });
+  const task = await taskService.createTask({ type, doctorId: parseId(doctorId), carNumber, slotId, destinationLat, destinationLng });
   await attendanceService.incrementVehiclesHandled(req.user.id);
-  await attendanceService.ensurePresent(doctorId).catch(() => {});
+  await attendanceService.ensurePresent(parseId(doctorId)).catch(() => {});
 
   res.status(201).json({ task: serializeTask(task) });
 });
@@ -48,17 +49,33 @@ const assignDriver = asyncHandler(async (req, res) => {
   const { driverId } = req.body;
   if (!driverId) throw ApiError.badRequest('driverId is required');
 
-  const task = await taskService.assignDriver(req.params.id, driverId);
+  const task = await taskService.assignDriver(parseId(req.params.id), parseId(driverId));
+  res.json({ task: serializeTask(task) });
+});
+
+// Driver: explicit accept/decline of an assignment — ownership enforced by
+// passing the caller's own driver id into the service.
+const accept = asyncHandler(async (req, res) => {
+  const driverId = req.user.driver?.id;
+  if (!driverId && req.user.role !== 'admin') throw ApiError.forbidden('Only drivers can accept tasks');
+  const task = await taskService.acceptTask(parseId(req.params.id), driverId ?? parseId(req.body.driverId));
+  res.json({ task: serializeTask(task) });
+});
+
+const reject = asyncHandler(async (req, res) => {
+  const driverId = req.user.driver?.id;
+  if (!driverId && req.user.role !== 'admin') throw ApiError.forbidden('Only drivers can reject tasks');
+  const task = await taskService.rejectTask(parseId(req.params.id), driverId ?? parseId(req.body.driverId));
   res.json({ task: serializeTask(task) });
 });
 
 const keyCollected = asyncHandler(async (req, res) => {
-  const task = await taskService.markKeyCollected(req.params.id);
+  const task = await taskService.markKeyCollected(parseId(req.params.id));
   res.json({ task: serializeTask(task) });
 });
 
 const inTransit = asyncHandler(async (req, res) => {
-  const task = await taskService.markInTransit(req.params.id);
+  const task = await taskService.markInTransit(parseId(req.params.id));
   await attendanceService.ensurePresent(req.user.id).catch(() => {});
   res.json({ task: serializeTask(task) });
 });
@@ -67,12 +84,18 @@ const park = asyncHandler(async (req, res) => {
   const { slotId } = req.body;
   if (!slotId) throw ApiError.badRequest('slotId is required');
 
-  const task = await taskService.markParked(req.params.id, slotId);
+  const task = await taskService.markParked(parseId(req.params.id), slotId);
   res.json({ task: serializeTask(task) });
 });
 
 const retrieve = asyncHandler(async (req, res) => {
-  const task = await taskService.markRetrieved(req.params.id);
+  const task = await taskService.markRetrieved(parseId(req.params.id));
+  res.json({ task: serializeTask(task) });
+});
+
+// Valet: confirms the doctor/staff member actually came and took the car.
+const confirmDelivered = asyncHandler(async (req, res) => {
+  const task = await taskService.confirmDelivered(parseId(req.params.id));
   res.json({ task: serializeTask(task) });
 });
 
@@ -84,13 +107,14 @@ const updateLocation = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('lat and lng (numbers) are required');
   }
 
-  const task = await taskService.getTask(req.params.id);
+  const id = parseId(req.params.id);
+  const task = await taskService.getTask(id);
   if (req.user.role !== 'admin' && task.driverId !== req.user.driver?.id) {
     throw ApiError.forbidden('You are not the driver assigned to this task');
   }
 
-  const updated = await taskService.updateLocation(req.params.id, lat, lng);
+  const updated = await taskService.updateLocation(id, lat, lng);
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, keyCollected, inTransit, park, retrieve, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, updateLocation };

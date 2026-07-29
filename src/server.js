@@ -4,11 +4,14 @@
 const { NODE_ENV, PORT, envFile } = require('./config/env');
 
 const app = require('./app');
+const { initRealtime } = require('./realtime');
 
 const server = app.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`[kims-parking-backend] ${NODE_ENV} server listening on port ${PORT} (loaded ${envFile})`);
 });
+
+initRealtime(server);
 
 async function shutdown(signal) {
   // eslint-disable-next-line no-console

@@ -6,7 +6,7 @@ const ApiError = require('../utils/ApiError');
 async function login(loginName, password) {
   // Case-insensitive — nobody should get locked out over "dr." vs "Dr.".
   const user = await prisma.user.findFirst({
-    where: { loginName: { equals: loginName.trim(), mode: 'insensitive' } },
+    where: { username: { equals: loginName.trim(), mode: 'insensitive' } },
     include: { driver: true },
   });
   if (!user) throw ApiError.unauthorized('Invalid login name or password');

@@ -24,6 +24,7 @@ function serializeTask(task) {
     assignedAt: task.assignedAt,
     keyCollectedAt: task.keyCollectedAt,
     completedAt: task.completedAt,
+    acceptedAt: task.acceptedAt ?? undefined,
     eta: task.eta ?? undefined,
     trackingProgress: task.trackingProgress ?? undefined,
     driverLat: task.driverLat ?? undefined,
@@ -65,14 +66,21 @@ function serializeVisitor(v) {
   return {
     id: v.id,
     name: v.name,
-    carNumber: v.carNumber,
+    carNumber: v.carNumber || undefined, // '' means "no plate captured yet"
     mobile: v.mobile,
+    vehicleType: v.vehicleType ?? 'car',
     slotId: v.slotId ?? undefined,
     driverId: v.driverId ?? undefined,
     driverName: v.driver?.user?.name ?? v.driverName ?? undefined,
     status: v.status,
     retrievalRequested: v.retrievalRequested,
+    driverAssignedAt: v.driverAssignedAt ?? undefined,
+    acceptedAt: v.acceptedAt ?? undefined,
+    pickedUpAt: v.pickedUpAt ?? undefined,
+    cancelledAt: v.cancelledAt ?? undefined,
+    cancelReason: v.cancelReason ?? undefined,
     token: v.token,
+    publicToken: v.publicToken,
     trackingProgress: v.trackingProgress ?? undefined,
     createdAt: v.createdAt,
   };
@@ -84,7 +92,8 @@ function serializeVisitorPublic(v) {
   if (!v) return null;
   return {
     name: v.name,
-    carNumber: v.carNumber,
+    carNumber: v.carNumber || undefined,
+    vehicleType: v.vehicleType ?? 'car',
     slotId: v.slotId ?? undefined,
     driverName: v.driver?.user?.name ?? v.driverName ?? undefined,
     status: v.status,

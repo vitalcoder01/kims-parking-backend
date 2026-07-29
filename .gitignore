@@ -11,3 +11,6 @@ prisma/migrations/**/migration.sql.bak
 
 # One-time go-live seed script — contains the real admin password in plaintext.
 prisma/seed-production.js
+
+# Firebase service account key (FCM push) — real credential, never commit.
+secrets/

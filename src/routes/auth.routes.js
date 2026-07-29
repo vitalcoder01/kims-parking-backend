@@ -15,7 +15,10 @@ const loginLimiter = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: req => (req.body?.loginName ? String(req.body.loginName).toLowerCase() : ipKeyGenerator(req.ip)),
+  keyGenerator: req => {
+    const value = req.body?.username || req.body?.loginName;
+    return value ? String(value).toLowerCase() : ipKeyGenerator(req.ip);
+  },
   message: { error: { message: 'Too many login attempts. Please wait a few minutes and try again.' } },
 });
 

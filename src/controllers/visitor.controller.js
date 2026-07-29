@@ -3,6 +3,7 @@ const ApiError = require('../utils/ApiError');
 const visitorService = require('../services/visitor.service');
 const notificationService = require('../services/notification.service');
 const { serializeVisitor, serializeVisitorPublic } = require('../utils/serialize');
+const parseId = require('../utils/parseId');
 
 const list = asyncHandler(async (req, res) => {
   const visitors = await visitorService.listVisitors();
@@ -13,16 +14,46 @@ const list = asyncHandler(async (req, res) => {
 // opening the WhatsApp deep link with this token — that's a client-side
 // action (Linking.openURL), not something this API performs.
 const create = asyncHandler(async (req, res) => {
-  const { name, carNumber, mobile } = req.body;
-  if (!name || !carNumber || !mobile) {
-    throw ApiError.badRequest('name, carNumber and mobile are required');
+  const { name, carNumber, mobile, vehicleType } = req.body;
+  // carNumber is optional — the plate may not be available at intake.
+  if (!name || !mobile) {
+    throw ApiError.badRequest('name and mobile are required');
   }
-  const visitor = await visitorService.createVisitor({ name, carNumber, mobile });
+  const visitor = await visitorService.createVisitor({ name, carNumber, mobile, vehicleType });
   res.status(201).json({ visitor: serializeVisitor(visitor) });
 });
 
+// Driver: accept / reject the assigned pickup, and confirm physical key
+// collection — the driver id always comes from the caller's own session.
+const requireOwnDriverId = (req) => {
+  const driverId = req.user.driver?.id;
+  if (!driverId && req.user.role !== 'admin') throw ApiError.forbidden('Only drivers can do this');
+  return driverId ?? parseId(req.body.driverId);
+};
+
+const accept = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.acceptTask(parseId(req.params.id), requireOwnDriverId(req));
+  res.json({ visitor: serializeVisitor(visitor) });
+});
+
+const reject = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.rejectTask(parseId(req.params.id), requireOwnDriverId(req));
+  res.json({ visitor: serializeVisitor(visitor) });
+});
+
+const pickup = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.markPickedUp(parseId(req.params.id), requireOwnDriverId(req));
+  res.json({ visitor: serializeVisitor(visitor) });
+});
+
+// Valet: cancel a pending visitor (no-show / valet cancelled / parking failed).
+const cancel = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.cancelVisitor(parseId(req.params.id), req.body.reason);
+  res.json({ visitor: serializeVisitor(visitor) });
+});
+
 const update = asyncHandler(async (req, res) => {
-  const visitor = await visitorService.updateVisitor(req.params.id, req.body);
+  const visitor = await visitorService.updateVisitor(parseId(req.params.id), req.body);
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
@@ -30,14 +61,13 @@ const update = asyncHandler(async (req, res) => {
 const assignDriver = asyncHandler(async (req, res) => {
   const { driverId } = req.body;
   if (!driverId) throw ApiError.badRequest('driverId is required');
-  const visitor = await visitorService.assignDriver(req.params.id, driverId);
+  const visitor = await visitorService.assignDriver(parseId(req.params.id), parseId(driverId));
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
 const park = asyncHandler(async (req, res) => {
-  const { slotId } = req.body;
-  if (!slotId) throw ApiError.badRequest('slotId is required');
-  const visitor = await visitorService.markParked(req.params.id, slotId);
+  // slotId optional — omitted means "auto-assign the next free slot".
+  const visitor = await visitorService.markParked(parseId(req.params.id), req.body?.slotId);
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
@@ -47,12 +77,18 @@ const park = asyncHandler(async (req, res) => {
 const assignRetrievalDriver = asyncHandler(async (req, res) => {
   const { driverId } = req.body;
   if (!driverId) throw ApiError.badRequest('driverId is required');
-  const visitor = await visitorService.assignRetrievalDriver(req.params.id, driverId);
+  const visitor = await visitorService.assignRetrievalDriver(parseId(req.params.id), parseId(driverId));
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
 const retrieve = asyncHandler(async (req, res) => {
-  const visitor = await visitorService.markRetrieved(req.params.id);
+  const visitor = await visitorService.markRetrieved(parseId(req.params.id));
+  res.json({ visitor: serializeVisitor(visitor) });
+});
+
+// Valet: confirms the visitor actually came and took the car.
+const confirmDelivered = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.confirmDelivered(parseId(req.params.id));
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
@@ -77,4 +113,4 @@ const selfRequestRetrieval = asyncHandler(async (req, res) => {
   res.json({ visitor: serializeVisitorPublic(visitor) });
 });
 
-module.exports = { list, create, update, assignDriver, park, assignRetrievalDriver, retrieve, track, selfRequestRetrieval };
+module.exports = { list, create, update, assignDriver, accept, reject, pickup, cancel, park, assignRetrievalDriver, retrieve, confirmDelivered, track, selfRequestRetrieval };

@@ -8,18 +8,18 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 const USERS = [
-  { employeeId: 'DOC001', name: 'Dr. Arun Kumar', loginName: 'Dr. Arun Kumar', role: 'doctor', department: 'Cardiology', cardCode: '472' },
-  { employeeId: 'DOC002', name: 'Dr. Priya Sharma', loginName: 'Dr. Priya Sharma', role: 'doctor', department: 'Neurology', cardCode: '815' },
-  { employeeId: 'STF001', name: 'Nurse Kavitha', loginName: 'Nurse Kavitha', role: 'staff', department: 'ICU', cardCode: '239' },
-  { employeeId: 'STF002', name: 'Admin Suresh', loginName: 'Admin Suresh', role: 'staff', department: 'Reception', cardCode: '561' },
-  { employeeId: 'VAL001', name: 'Ramesh', loginName: 'Valet Ramesh', role: 'valet' },
-  { employeeId: 'VAL002', name: 'Deepa', loginName: 'Valet Deepa', role: 'valet' },
-  { employeeId: 'DRV001', name: 'Ravi Kumar', loginName: 'Driver Ravi Kumar', role: 'driver', phone: '9876543210' },
-  { employeeId: 'DRV002', name: 'Suresh Babu', loginName: 'Driver Suresh Babu', role: 'driver', phone: '9876543211' },
-  { employeeId: 'DRV003', name: 'Anand Raj', loginName: 'Driver Anand Raj', role: 'driver', phone: '9876543212' },
-  { employeeId: 'DRV004', name: 'Karthik M', loginName: 'Driver Karthik M', role: 'driver', phone: '9876543213' },
-  { employeeId: 'DRV005', name: 'Vijay S', loginName: 'Driver Vijay S', role: 'driver', phone: '9876543214' },
-  { employeeId: 'ADM001', name: 'Admin Manager', loginName: 'Admin Manager', role: 'admin' },
+  { employeeId: 'DOC001', name: 'Dr. Arun Kumar', username: 'Dr. Arun Kumar', role: 'doctor', department: 'Cardiology', cardCode: '472' },
+  { employeeId: 'DOC002', name: 'Dr. Priya Sharma', username: 'Dr. Priya Sharma', role: 'doctor', department: 'Neurology', cardCode: '815' },
+  { employeeId: 'STF001', name: 'Nurse Kavitha', username: 'Nurse Kavitha', role: 'staff', department: 'ICU', cardCode: '239' },
+  { employeeId: 'STF002', name: 'Admin Suresh', username: 'Admin Suresh', role: 'staff', department: 'Reception', cardCode: '561' },
+  { employeeId: 'VAL001', name: 'Ramesh', username: 'Valet Ramesh', role: 'valet' },
+  { employeeId: 'VAL002', name: 'Deepa', username: 'Valet Deepa', role: 'valet' },
+  { employeeId: 'DRV001', name: 'Ravi Kumar', username: 'Driver Ravi Kumar', role: 'driver', phone: '9876543210' },
+  { employeeId: 'DRV002', name: 'Suresh Babu', username: 'Driver Suresh Babu', role: 'driver', phone: '9876543211' },
+  { employeeId: 'DRV003', name: 'Anand Raj', username: 'Driver Anand Raj', role: 'driver', phone: '9876543212' },
+  { employeeId: 'DRV004', name: 'Karthik M', username: 'Driver Karthik M', role: 'driver', phone: '9876543213' },
+  { employeeId: 'DRV005', name: 'Vijay S', username: 'Driver Vijay S', role: 'driver', phone: '9876543214' },
+  { employeeId: 'ADM001', name: 'Admin Manager', username: 'Admin Manager', role: 'admin' },
 ];
 
 // Driver-role users get a status; Karthik starts busy, Vijay starts off duty

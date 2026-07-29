@@ -1,8 +1,3 @@
-// KIMS Hospital Smart Parking — Prisma schema
-// Datasource points at Supabase Postgres: `url` uses the pooled connection
-// (port 6543, pgbouncer) for normal app queries, `directUrl` uses the direct
-// connection (port 5432) which Prisma needs to run migrations.
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,6 +6,185 @@ datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
+}
+
+model User {
+  employeeId          String         @unique
+  password            String
+  name                String
+  role                Role
+  department          String?
+  cardCode            String?        @unique
+  carNumber           String?
+  phone               String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  username            String         @unique
+  failedLoginAttempts Int            @default(0)
+  lockedUntil         DateTime?
+  id                  Int            @id @default(autoincrement())
+  attendance          Attendance[]
+  driver              Driver?
+  notifications       Notification[]
+  parkedSlots         ParkingSlot[]  @relation("SlotDoctor")
+  tasksAsDoctor       ParkingTask[]  @relation("DoctorTasks")
+  deviceTokens        DeviceToken[]
+
+  @@index([role])
+  @@map("users")
+}
+
+model Driver {
+  status           DriverStatus  @default(available)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  id               Int           @id @default(autoincrement())
+  userId           Int           @unique
+  currentTaskId    Int?
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasksAsDriver    ParkingTask[] @relation("DriverTasks")
+  visitorsAsDriver Visitor[]     @relation("VisitorDriver")
+
+  @@index([status])
+  @@map("drivers")
+}
+
+model ParkingSlot {
+  id        String       @id
+  block     String
+  number    Int
+  status    SlotStatus   @default(free)
+  carNumber String?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  doctorId  Int?
+  taskId    Int?         @unique
+  doctor    User?        @relation("SlotDoctor", fields: [doctorId], references: [id])
+  task      ParkingTask? @relation("CurrentSlotTask", fields: [taskId], references: [id])
+
+  @@index([block])
+  @@index([status])
+  @@index([doctorId, status])
+  @@map("parking_slots")
+}
+
+model ParkingTask {
+  type              TaskType
+  carNumber         String
+  slotId            String?
+  status            TaskStatus   @default(assigned)
+  assignedAt        DateTime?
+  keyCollectedAt    DateTime?
+  completedAt       DateTime?
+  eta               Int?
+  trackingProgress  Float?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  driverLat         Float?
+  driverLng         Float?
+  locationUpdatedAt DateTime?
+  driverStartLat    Float?
+  driverStartLng    Float?
+  destinationLat    Float?
+  destinationLng    Float?
+  requestedAt       DateTime?
+  acceptedAt        DateTime?
+  id                Int          @id @default(autoincrement())
+  doctorId          Int
+  driverId          Int?
+  occupyingSlot     ParkingSlot? @relation("CurrentSlotTask")
+  doctor            User         @relation("DoctorTasks", fields: [doctorId], references: [id])
+  driver            Driver?      @relation("DriverTasks", fields: [driverId], references: [id])
+
+  @@index([doctorId])
+  @@index([driverId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([slotId])
+  @@map("parking_tasks")
+}
+
+model Visitor {
+  name               String
+  carNumber          String?
+  mobile             String
+  slotId             String?
+  driverName         String?
+  status             VisitorStatus @default(pending)
+  token              String
+  trackingProgress   Float?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  retrievalRequested Boolean       @default(false)
+  id                 Int           @id @default(autoincrement())
+  driverId           Int?
+  publicToken        String        @unique @default(cuid())
+  pickedUpAt         DateTime?
+  acceptedAt         DateTime?
+  cancelReason       String?
+  cancelledAt        DateTime?
+  driverAssignedAt   DateTime?
+  vehicleType        VehicleType   @default(car)
+  driver             Driver?       @relation("VisitorDriver", fields: [driverId], references: [id])
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([driverId])
+  @@map("visitors")
+}
+
+model Notification {
+  targetRole   String
+  title        String
+  body         String
+  type         NotificationType @default(info)
+  read         Boolean          @default(false)
+  createdAt    DateTime         @default(now())
+  id           Int              @id @default(autoincrement())
+  targetUserId Int?
+  targetUser   User?            @relation(fields: [targetUserId], references: [id])
+
+  @@index([targetRole])
+  @@index([targetUserId])
+  @@index([read])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model Attendance {
+  date            DateTime  @db.Date
+  checkIn         DateTime?
+  checkOut        DateTime?
+  vehiclesHandled Int       @default(0)
+  gate            String?
+  createdAt       DateTime  @default(now())
+  id              Int       @id @default(autoincrement())
+  userId          Int
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@map("attendance")
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model DeviceToken {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  platform  String   @default("android")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("device_tokens")
 }
 
 enum Role {
@@ -33,11 +207,15 @@ enum TaskType {
 }
 
 enum TaskStatus {
-  requested
   assigned
   key_collected
   in_transit
+  // Retrieve tasks only: driver has brought the car back to the valet
+  // counter, but the owner hasn't been confirmed as having taken it yet —
+  // completed only fires once the valet explicitly confirms the handover.
+  delivered
   completed
+  requested
 }
 
 enum SlotStatus {
@@ -49,7 +227,11 @@ enum SlotStatus {
 enum VisitorStatus {
   pending
   parked
+  // Driver has brought the car back to the valet counter, awaiting the
+  // valet's explicit confirmation that the visitor actually took it.
+  delivered
   retrieved
+  cancelled
 }
 
 enum NotificationType {
@@ -58,199 +240,7 @@ enum NotificationType {
   warning
 }
 
-model User {
-  id         String   @id @default(cuid())
-  employeeId String   @unique // internal admin-assigned ID — no longer used to log in
-  // What staff actually type to log in — auto-derived from role + name
-  // ("Dr. <name>" for doctors, "Valet <name>" for valets, "Driver <name>"
-  // for drivers, plain name for staff/admin) whenever an account is created
-  // or renamed, so nobody has to remember an employee code.
-  loginName  String   @unique
-  password   String // bcrypt hash
-  name       String
-  role       Role
-  department String?
-  cardCode   String?  @unique // 3-digit valet identification code (doctor/staff only)
-  carNumber  String?
-  phone      String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-
-  driver          Driver?
-  tasksAsDoctor   ParkingTask[]  @relation("DoctorTasks")
-  parkedSlots     ParkingSlot[]  @relation("SlotDoctor")
-  notifications   Notification[]
-  attendance      Attendance[]
-
-  @@index([role])
-  @@map("users")
-}
-
-// Operational state for driver-role users, kept separate from User so the
-// login identity and driver assignment state can never drift apart (this is
-// exactly the bug class the mobile app hit before linkedDriverId was added).
-model Driver {
-  id            String       @id @default(cuid())
-  userId        String       @unique
-  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  status        DriverStatus @default(available)
-  currentTaskId String?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-
-  tasksAsDriver ParkingTask[] @relation("DriverTasks")
-  visitorsAsDriver Visitor[] @relation("VisitorDriver")
-
-  @@index([status])
-  @@map("drivers")
-}
-
-model ParkingSlot {
-  id        String     @id // human-readable code, e.g. "A-001"
-  block     String
-  number    Int
-  status    SlotStatus @default(free)
-  carNumber String?
-  doctorId  String?
-  doctor    User?      @relation("SlotDoctor", fields: [doctorId], references: [id])
-
-  // The task currently occupying this slot (nullable — cleared on retrieval).
-  taskId String?      @unique
-  task   ParkingTask? @relation("CurrentSlotTask", fields: [taskId], references: [id])
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([block])
-  @@index([status])
-  // Matches task.service.js requestRetrieval's exact filter (an occupied
-  // slot belonging to one doctor) — without this it's a full table scan
-  // filtered by the (indexed but low-selectivity) status column alone.
-  @@index([doctorId, status])
-  @@map("parking_slots")
-}
-
-model ParkingTask {
-  id       String     @id @default(cuid())
-  type     TaskType
-  doctorId String
-  doctor   User       @relation("DoctorTasks", fields: [doctorId], references: [id])
-  carNumber String
-
-  // Plain reference (not a formal relation) — a slot is visited by more than
-  // one task over its lifetime (a park task, later a retrieve task), so this
-  // is intentionally not the same edge as ParkingSlot.taskId above.
-  slotId String?
-
-  driverId String?
-  driver   Driver? @relation("DriverTasks", fields: [driverId], references: [id])
-
-  status           TaskStatus @default(assigned)
-  requestedAt      DateTime? // when the doctor asked for retrieval, before a driver is assigned
-  assignedAt       DateTime?
-  keyCollectedAt   DateTime?
-  completedAt      DateTime?
-  eta              Int? // minutes — the doctor's requested departure time for a retrieval
-  trackingProgress Float? // 0..1
-
-  // Live GPS position reported by the assigned driver's phone while en route.
-  driverLat         Float?
-  driverLng         Float?
-  locationUpdatedAt DateTime?
-
-  // First GPS fix after the driver starts moving — the anchor every viewer
-  // (driver's own screens + doctor/staff/valet) computes trip progress from,
-  // so everyone derives the same percentage from the same two points.
-  driverStartLat Float?
-  driverStartLng Float?
-
-  // Real destination for distance/ETA math — captured from the reporting
-  // staff member's own phone GPS at the moment the trip is created (the
-  // valet's location for a retrieve trip's "bring it to me" point), so
-  // progress/ETA are computed against an actual place instead of a guessed
-  // constant distance.
-  destinationLat Float?
-  destinationLng Float?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  occupyingSlot ParkingSlot? @relation("CurrentSlotTask")
-
-  @@index([doctorId])
-  @@index([driverId])
-  @@index([status])
-  @@index([createdAt])
-  // requestRetrieval checks for an existing non-completed retrieve task on
-  // this exact slot before creating a new one — without this it's a full
-  // table scan of task history on every retrieval request.
-  @@index([slotId])
-  @@map("parking_tasks")
-}
-
-model Visitor {
-  id         String        @id @default(cuid())
-  name       String
-  carNumber  String
-  mobile     String
-  slotId     String?
-  driverId   String?
-  driver     Driver?       @relation("VisitorDriver", fields: [driverId], references: [id])
-  driverName String?
-  status     VisitorStatus @default(pending)
-  token      String
-
-  // Set once a parked visitor's car has been asked back for, cleared again
-  // on retrieve — lets the valet/driver UI show "pickup requested" without
-  // a dedicated status enum value (status stays 'parked' the whole time).
-  retrievalRequested Boolean @default(false)
-
-  trackingProgress Float?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-
-  @@index([status])
-  @@index([createdAt])
-  @@index([driverId])
-  @@map("visitors")
-}
-
-model Notification {
-  id     String @id @default(cuid())
-  // Role-wide broadcast target ('doctor' | 'staff' | 'valet' | 'driver' |
-  // 'admin' | 'all') OR a precise 'driver:<id>' style tag; kept as a plain
-  // string to match the flexible targeting already used by the mobile app.
-  targetRole String
-
-  // Precise single-user target when the notification is meant for exactly
-  // one person (in addition to / instead of targetRole).
-  targetUserId String?
-  targetUser   User?             @relation(fields: [targetUserId], references: [id])
-
-  title     String
-  body      String
-  type      NotificationType @default(info)
-  read      Boolean          @default(false)
-  createdAt DateTime         @default(now())
-
-  @@index([targetRole])
-  @@index([targetUserId])
-  @@index([read])
-  @@index([createdAt])
-  @@map("notifications")
-}
-
-model Attendance {
-  id              String    @id @default(cuid())
-  userId          String
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  date            DateTime  @db.Date
-  checkIn         DateTime?
-  checkOut        DateTime?
-  vehiclesHandled Int       @default(0)
-  gate            String?
-  createdAt       DateTime  @default(now())
-
-  @@unique([userId, date])
-  @@map("attendance")
+enum VehicleType {
+  car
+  bike
 }
