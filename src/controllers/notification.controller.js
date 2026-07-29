@@ -33,4 +33,14 @@ const registerDevice = asyncHandler(async (req, res) => {
   res.status(204).end();
 });
 
-module.exports = { push, listMine, markRead, registerDevice };
+// Called on logout — stops this phone from receiving the signed-out
+// account's pushes instead of leaving the token bound until someone else
+// logs in on the same device.
+const unregisterDevice = asyncHandler(async (req, res) => {
+  const { token } = req.body;
+  if (!token) throw ApiError.badRequest('token is required');
+  await pushService.unregisterDevice(req.user.id, token);
+  res.status(204).end();
+});
+
+module.exports = { push, listMine, markRead, registerDevice, unregisterDevice };

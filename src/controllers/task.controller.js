@@ -6,8 +6,11 @@ const { serializeTask } = require('../utils/serialize');
 const parseId = require('../utils/parseId');
 
 const list = asyncHandler(async (req, res) => {
-  const { doctorId, driverId, status, type } = req.query;
-  const tasks = await taskService.listTasks({ doctorId: parseId(doctorId), driverId: parseId(driverId), status, type });
+  const { doctorId, driverId, status, type, history } = req.query;
+  const tasks = await taskService.listTasks({
+    doctorId: parseId(doctorId), driverId: parseId(driverId), status, type,
+    history: history === 'true',
+  });
   res.json({ tasks: tasks.map(serializeTask) });
 });
 
@@ -29,11 +32,13 @@ const create = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('Retrieval must be requested by the doctor/staff who owns the car (POST /tasks/request-retrieval)');
   }
 
-  const task = await taskService.createTask({ type, doctorId: parseId(doctorId), carNumber, slotId, destinationLat, destinationLng });
-  await attendanceService.incrementVehiclesHandled(req.user.id);
+  const { task, created } = await taskService.createTask({ type, doctorId: parseId(doctorId), carNumber, slotId, destinationLat, destinationLng });
+  // A repeat call that returned the existing task (double-tap) isn't a new
+  // vehicle handled — only count real creations.
+  if (created) await attendanceService.incrementVehiclesHandled(req.user.id);
   await attendanceService.ensurePresent(parseId(doctorId)).catch(() => {});
 
-  res.status(201).json({ task: serializeTask(task) });
+  res.status(created ? 201 : 200).json({ task: serializeTask(task) });
 });
 
 // Doctor/staff: request retrieval of their own parked car. The car's real
@@ -99,6 +104,13 @@ const confirmDelivered = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Valet/admin: retire a stuck task (e.g. never got a driver) instead of it
+// silently blocking every later session for that doctor forever.
+const cancel = asyncHandler(async (req, res) => {
+  const task = await taskService.cancelTask(parseId(req.params.id));
+  res.json({ task: serializeTask(task) });
+});
+
 // Driver: live GPS ping. Only the driver assigned to this task may report a
 // position for it — otherwise any driver could spoof another's location.
 const updateLocation = asyncHandler(async (req, res) => {
@@ -117,4 +129,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, updateLocation };

@@ -48,6 +48,14 @@ async function registerDevice(userId, token, platform = 'android') {
   });
 }
 
+// Called on logout so a phone stops receiving this account's pushes the
+// moment it signs out, instead of staying bound until someone else logs in
+// on the same device. Scoped to (userId, token) so a request can only drop
+// its own registration, never another account's.
+async function unregisterDevice(userId, token) {
+  await prisma.deviceToken.deleteMany({ where: { userId, token } });
+}
+
 // Resolve a Notification-style target (role name, 'all', 'driver:<id>',
 // 'doctor:<userId>' or explicit userId) to the concrete user ids to push to.
 async function resolveTargetUserIds(targetRole, targetUserId) {
@@ -116,4 +124,4 @@ async function pushToTarget(targetRole, targetUserId, payload) {
   return pushToUsers(userIds, payload);
 }
 
-module.exports = { registerDevice, pushToUsers, pushToTarget, resolveTargetUserIds };
+module.exports = { registerDevice, unregisterDevice, pushToUsers, pushToTarget, resolveTargetUserIds };

@@ -18,6 +18,7 @@ router.patch('/:id/in-transit', requireRole('driver', 'admin'), ctrl.inTransit);
 router.patch('/:id/park', requireRole('driver', 'admin'), ctrl.park);
 router.patch('/:id/retrieve', requireRole('driver', 'admin'), ctrl.retrieve);
 router.patch('/:id/confirm-delivered', requireRole('valet', 'admin'), ctrl.confirmDelivered);
+router.patch('/:id/cancel', requireRole('valet', 'admin'), ctrl.cancel);
 router.patch('/:id/location', requireRole('driver', 'admin'), ctrl.updateLocation);
 
 module.exports = router;

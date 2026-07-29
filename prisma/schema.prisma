@@ -89,6 +89,14 @@ model ParkingTask {
   destinationLng    Float?
   requestedAt       DateTime?
   acceptedAt        DateTime?
+  // One doctor/staff member ever has at most one row with isCurrent=true —
+  // enforced by a partial unique index (see the manual migration SQL,
+  // Prisma's schema DSL can't express a WHERE-qualified unique constraint).
+  // Every other row for that doctor is retired history, never deleted, so
+  // "current status" and "history" are both just this same table with a
+  // different filter, and there is no more "which of several tasks is the
+  // real one" ambiguity anywhere in the app.
+  isCurrent         Boolean      @default(true)
   id                Int          @id @default(autoincrement())
   doctorId          Int
   driverId          Int?
@@ -97,6 +105,7 @@ model ParkingTask {
   driver            Driver?      @relation("DriverTasks", fields: [driverId], references: [id])
 
   @@index([doctorId])
+  @@index([doctorId, createdAt])
   @@index([driverId])
   @@index([status])
   @@index([createdAt])
@@ -216,6 +225,10 @@ enum TaskStatus {
   delivered
   completed
   requested
+  // Superseded by a later session before ever finishing (e.g. a forgotten
+  // "assigned, no driver" job once the same doctor's next car comes in), or
+  // explicitly cancelled by staff. Terminal, same as completed.
+  cancelled
 }
 
 enum SlotStatus {

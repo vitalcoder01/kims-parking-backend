@@ -55,31 +55,49 @@ function assertTransition(task, allowed, action) {
 // The mobile app polls this every ~4s with no filters at all, so an
 // unfiltered query re-sends the entire all-time task history to every
 // connected client on every poll — unbounded and only gets worse as the
-// hospital operates over months. When the caller doesn't ask for a specific
-// status, default to "active, plus anything completed recently" and cap the
-// result, which keeps the common (polling) case bounded while still
-// supporting exact history queries when a status is explicitly requested.
-const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
+// hospital operates over months. `isCurrent` bounds this naturally now: at
+// most one row per doctor is ever current, so the live-board query is
+// proportional to headcount, not to how much history has piled up. Pass
+// `history: true` (with a doctorId) to explicitly bypass that and read a
+// doctor's full past-sessions log instead.
 const DEFAULT_TASK_LIMIT = 200;
 
-async function listTasks({ doctorId, driverId, status, type } = {}) {
+async function listTasks({ doctorId, driverId, status, type, history } = {}) {
   // Not per-user — every client polling with the same filters gets the same
   // rows, so dedupe concurrent pollers onto one query for a couple seconds
   // instead of every phone hitting Postgres on its own 4s tick.
-  const key = `tasks:${doctorId ?? ''}:${driverId ?? ''}:${status ?? ''}:${type ?? ''}`;
+  const key = `tasks:${doctorId ?? ''}:${driverId ?? ''}:${status ?? ''}:${type ?? ''}:${history ? 'h' : ''}`;
   return cache.cached(key, CACHE_TTL_MS, () => prisma.parkingTask.findMany({
     where: {
       ...(doctorId && { doctorId }),
       ...(driverId && { driverId }),
       ...(type && { type }),
-      ...(status
-        ? { status }
-        : { OR: [{ status: { not: 'completed' } }, { completedAt: { gte: new Date(Date.now() - DEFAULT_WINDOW_MS) } }] }),
+      ...(status && { status }),
+      ...(!history && { isCurrent: true }),
     },
     include: taskInclude,
     orderBy: { createdAt: 'desc' },
     take: DEFAULT_TASK_LIMIT,
   }));
+}
+
+// Retires whatever this doctor's current row is (if any) so a new one can
+// become current without ever violating "at most one isCurrent row per
+// doctor". A row already at a terminal status (completed/cancelled) just
+// stops being current — its outcome stands. A row still mid-flight (e.g. an
+// old "assigned, no driver" job nobody ever finished) is being superseded by
+// a genuinely new session, so it's force-cancelled rather than left
+// dangling forever in a status that claims to still be in progress.
+async function retireCurrentTask(tx, doctorId) {
+  const existing = await tx.parkingTask.findFirst({ where: { doctorId, isCurrent: true } });
+  if (!existing) return;
+  const terminal = existing.status === 'completed' || existing.status === 'cancelled';
+  await tx.parkingTask.update({
+    where: { id: existing.id },
+    data: terminal
+      ? { isCurrent: false }
+      : { isCurrent: false, status: 'cancelled', completedAt: new Date() },
+  });
 }
 
 async function getTask(id) {
@@ -94,22 +112,43 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
   const doctor = await prisma.user.findUnique({ where: { id: doctorId } });
   if (!doctor) throw ApiError.badRequest('doctorId does not reference a valid user');
 
-  const task = await prisma.parkingTask.create({
-    data: {
-      type,
-      doctorId,
-      carNumber: carNumber.trim().toUpperCase(),
-      slotId: slotId ?? null,
-      status: 'assigned',
-      assignedAt: new Date(),
-      destinationLat: destinationLat ?? null,
-      destinationLng: destinationLng ?? null,
-    },
-    include: taskInclude,
+  // A double-tap on "Key Received" (or a slow first request retried) would
+  // otherwise create two live park tasks for the same doctor — return the
+  // existing one instead of a duplicate, but only within a short window:
+  // this is a guard against an accidental repeat click, not a rule that a
+  // doctor can only ever have one task ever. An old still-open task from
+  // long ago is a forgotten/stuck one, not a duplicate of *this* click, so
+  // it gets superseded (see retireCurrentTask) instead of returned.
+  const DUPLICATE_TAP_MS = 2 * 60 * 1000;
+  const { task, created } = await runSerializable(async tx => {
+    const existing = await tx.parkingTask.findFirst({ where: { doctorId, isCurrent: true }, include: taskInclude });
+    if (existing) {
+      const isOpen = existing.status !== 'completed' && existing.status !== 'cancelled';
+      const isFresh = Date.now() - existing.createdAt.getTime() < DUPLICATE_TAP_MS;
+      if (isOpen && isFresh) return { task: existing, created: false };
+    }
+
+    await retireCurrentTask(tx, doctorId);
+
+    const made = await tx.parkingTask.create({
+      data: {
+        type,
+        doctorId,
+        carNumber: carNumber.trim().toUpperCase(),
+        slotId: slotId ?? null,
+        status: 'assigned',
+        assignedAt: new Date(),
+        destinationLat: destinationLat ?? null,
+        destinationLng: destinationLng ?? null,
+        isCurrent: true,
+      },
+      include: taskInclude,
+    });
+    return { task: made, created: true };
   });
   cache.invalidate('tasks:');
   emitTask(task);
-  return task;
+  return { task, created };
 }
 
 // Doctor/staff: request retrieval of their own currently-parked car. This is
@@ -125,6 +164,12 @@ async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng 
     });
     if (existing) throw ApiError.conflict('Retrieval has already been requested for this car');
 
+    // The just-completed park row is this doctor's current row — retiring
+    // it here (rather than leaving two isCurrent rows around) is what keeps
+    // "one row per doctor" true across a park -> retrieve cycle, not just
+    // within a single task type.
+    await retireCurrentTask(tx, doctorId);
+
     return tx.parkingTask.create({
       data: {
         type: 'retrieve',
@@ -136,6 +181,7 @@ async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng 
         eta: eta ?? null,
         destinationLat: destinationLat ?? null,
         destinationLng: destinationLng ?? null,
+        isCurrent: true,
       },
       include: taskInclude,
     });
@@ -415,6 +461,38 @@ async function updateLocation(taskId, lat, lng) {
   return updated;
 }
 
+// Staff/admin: retire a task that's stuck (no driver ever assigned/accepted,
+// or genuinely abandoned) without waiting for a new session to naturally
+// supersede it. Terminal, same weight as completed — just an honest outcome
+// instead of a silent one.
+async function cancelTask(taskId) {
+  const task = await getTask(taskId);
+  assertTransition(task, ['requested', 'assigned', 'key_collected', 'in_transit', 'delivered'], 'cancel');
+  watchdog.disarm('task', taskId);
+
+  const updated = await runSerializable(async tx => {
+    const result = await tx.parkingTask.update({
+      where: { id: taskId },
+      data: { status: 'cancelled', completedAt: new Date() },
+      include: taskInclude,
+    });
+    // A driver left mid-assignment would otherwise stay stuck 'busy' on a
+    // task that no longer exists in any meaningful sense.
+    if (task.driverId) {
+      await tx.driver.update({ where: { id: task.driverId }, data: { status: 'available', currentTaskId: null } });
+    }
+    return result;
+  });
+
+  cache.invalidate('tasks:');
+  if (task.driverId) {
+    cache.invalidate('drivers:');
+    emitDriverPatch(task.driverId, 'available', null);
+  }
+  emitTask(updated);
+  return updated;
+}
+
 module.exports = {
   listTasks,
   getTask,
@@ -428,5 +506,6 @@ module.exports = {
   markParked,
   markRetrieved,
   confirmDelivered,
+  cancelTask,
   updateLocation,
 };
