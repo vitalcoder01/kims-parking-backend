@@ -148,6 +148,16 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
   });
   cache.invalidate('tasks:');
   emitTask(task);
+
+  // The valet just typed a plate in for someone with none on file yet — save
+  // it to their profile too, so future visits don't ask again. Only when it
+  // was genuinely empty: never overwrite a value the doctor already set
+  // themselves with whatever the valet typed this one time (a mis-scanned
+  // code would otherwise permanently misattach a plate to the wrong person).
+  if (created && !doctor.carNumber?.trim()) {
+    await prisma.user.update({ where: { id: doctorId }, data: { carNumber: task.carNumber } }).catch(() => {});
+  }
+
   return { task, created };
 }
 
