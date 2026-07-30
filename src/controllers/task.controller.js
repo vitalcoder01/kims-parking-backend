@@ -79,8 +79,22 @@ const keyCollected = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Only the driver actually assigned to a task may drive its own stages
+// forward — updateLocation already enforced this; in_transit/park/retrieve
+// didn't, which meant any authenticated driver could in principle progress
+// (or corrupt) a job that was never assigned to them.
+async function assertOwnDriverTask(req, id) {
+  const task = await taskService.getTask(id);
+  if (req.user.role !== 'admin' && task.driverId !== req.user.driver?.id) {
+    throw ApiError.forbidden('You are not the driver assigned to this task');
+  }
+  return task;
+}
+
 const inTransit = asyncHandler(async (req, res) => {
-  const task = await taskService.markInTransit(parseId(req.params.id));
+  const id = parseId(req.params.id);
+  await assertOwnDriverTask(req, id);
+  const task = await taskService.markInTransit(id);
   await attendanceService.ensurePresent(req.user.id).catch(() => {});
   res.json({ task: serializeTask(task) });
 });
@@ -89,12 +103,16 @@ const park = asyncHandler(async (req, res) => {
   const { slotId } = req.body;
   if (!slotId) throw ApiError.badRequest('slotId is required');
 
-  const task = await taskService.markParked(parseId(req.params.id), slotId);
+  const id = parseId(req.params.id);
+  await assertOwnDriverTask(req, id);
+  const task = await taskService.markParked(id, slotId);
   res.json({ task: serializeTask(task) });
 });
 
 const retrieve = asyncHandler(async (req, res) => {
-  const task = await taskService.markRetrieved(parseId(req.params.id));
+  const id = parseId(req.params.id);
+  await assertOwnDriverTask(req, id);
+  const task = await taskService.markRetrieved(id);
   res.json({ task: serializeTask(task) });
 });
 

@@ -4,6 +4,7 @@ const cache = require('../utils/responseCache');
 const realtime = require('../realtime');
 const watchdog = require('./acceptWatchdog');
 const arrivalNoticeService = require('./arrivalNotice.service');
+const settingService = require('./setting.service');
 const { serializeTask, serializeSlot } = require('../utils/serialize');
 
 // Realtime deltas: every mutation below emits the changed entity itself so
@@ -121,6 +122,18 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
   // long ago is a forgotten/stuck one, not a duplicate of *this* click, so
   // it gets superseded (see retireCurrentTask) instead of returned.
   const DUPLICATE_TAP_MS = 2 * 60 * 1000;
+  // A park task has no per-request destination the way a retrieval does
+  // (that one's derived from the doctor's live location) — the real
+  // destination is just the parking lot itself, a fixed point the admin
+  // sets once (Settings screen), so fall back to it here whenever the
+  // caller didn't already supply one.
+  let destLat = destinationLat ?? null;
+  let destLng = destinationLng ?? null;
+  if (destLat == null || destLng == null) {
+    const lotDest = await settingService.getParkingLotDestination();
+    destLat = destLat ?? lotDest?.lat ?? null;
+    destLng = destLng ?? lotDest?.lng ?? null;
+  }
   const { task, created } = await runSerializable(async tx => {
     const existing = await tx.parkingTask.findFirst({ where: { doctorId, isCurrent: true }, include: taskInclude });
     if (existing) {
@@ -139,8 +152,8 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
         slotId: slotId ?? null,
         status: 'assigned',
         assignedAt: new Date(),
-        destinationLat: destinationLat ?? null,
-        destinationLng: destinationLng ?? null,
+        destinationLat: destLat,
+        destinationLng: destLng,
         isCurrent: true,
       },
       include: taskInclude,

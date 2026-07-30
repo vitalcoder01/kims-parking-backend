@@ -65,9 +65,21 @@ const assignDriver = asyncHandler(async (req, res) => {
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
+// Same gap task.controller.js had: park/retrieve are driver actions but
+// never verified the caller was actually the driver assigned to this job.
+async function assertOwnDriverVisitor(req, id) {
+  const visitor = await visitorService.getVisitor(id);
+  if (req.user.role !== 'admin' && visitor.driverId !== req.user.driver?.id) {
+    throw ApiError.forbidden('You are not the driver assigned to this pickup');
+  }
+  return visitor;
+}
+
 const park = asyncHandler(async (req, res) => {
+  const id = parseId(req.params.id);
+  await assertOwnDriverVisitor(req, id);
   // slotId optional — omitted means "auto-assign the next free slot".
-  const visitor = await visitorService.markParked(parseId(req.params.id), req.body?.slotId);
+  const visitor = await visitorService.markParked(id, req.body?.slotId);
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
@@ -82,7 +94,9 @@ const assignRetrievalDriver = asyncHandler(async (req, res) => {
 });
 
 const retrieve = asyncHandler(async (req, res) => {
-  const visitor = await visitorService.markRetrieved(parseId(req.params.id));
+  const id = parseId(req.params.id);
+  await assertOwnDriverVisitor(req, id);
+  const visitor = await visitorService.markRetrieved(id);
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
