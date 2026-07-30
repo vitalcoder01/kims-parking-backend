@@ -479,10 +479,19 @@ async function markInTransit(taskId, driverId) {
 
 // Driver: "Mark Parked" — occupies the slot, frees the driver, completes the task.
 async function markParked(taskId, slotId, driverId) {
-  // Serializable, not the default Read Committed: two drivers marking
-  // parked into the same slot at the same instant would otherwise both read
-  // it as free and both write, silently losing one car's slot record.
-  const { task, slot, freedDriver } = await runSerializable(async (tx) => {
+  // Deliberately NOT Serializable. This runs while the task is
+  // key_collected/in_transit — exactly when the driver's phone is writing a
+  // GPS ping to this same row every few seconds. Under Serializable that
+  // read-write dependency aborts the transaction, and the driver standing
+  // at the slot gets "please try again" for a conflict that has nothing to
+  // do with what they're doing.
+  //
+  // The race that genuinely needs protecting is two drivers claiming the
+  // same free slot, and a conditional write handles that atomically at Read
+  // Committed: `updateMany ... WHERE id = ? AND status = 'free'` either
+  // matches (we won the slot) or matches nothing (someone else took it
+  // first). No isolation escalation, no GPS contention.
+  const { task, slot, freedDriver } = await prisma.$transaction(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!task) throw ApiError.notFound('Task not found');
     assertOwnDriver(task, driverId);
@@ -494,12 +503,11 @@ async function markParked(taskId, slotId, driverId) {
       throw ApiError.conflict('This job was recalled — bring the car back to the valet counter instead');
     }
 
-    const slot = await tx.parkingSlot.findUnique({ where: { id: slotId } });
-    if (!slot) throw ApiError.badRequest(`Slot ${slotId} does not exist`);
-    if (slot.status !== 'free') throw ApiError.conflict(`Slot ${slotId} is not free`);
+    const exists = await tx.parkingSlot.findUnique({ where: { id: slotId } });
+    if (!exists) throw ApiError.badRequest(`Slot ${slotId} does not exist`);
 
-    const updatedSlot = await tx.parkingSlot.update({
-      where: { id: slotId },
+    const claimed = await tx.parkingSlot.updateMany({
+      where: { id: slotId, status: 'free' },
       data: {
         status: 'occupied',
         carNumber: task.carNumber,
@@ -507,6 +515,8 @@ async function markParked(taskId, slotId, driverId) {
         taskId: task.id,
       },
     });
+    if (claimed.count === 0) throw ApiError.conflict(`Slot ${slotId} is not free`);
+    const updatedSlot = await tx.parkingSlot.findUnique({ where: { id: slotId } });
 
     const freed = await freeDriverIfStillOn(tx, task.driverId, taskId);
 
@@ -528,7 +538,12 @@ async function markParked(taskId, slotId, driverId) {
 
 // Driver: "Car Delivered to Valet Counter" — frees the slot, frees the driver.
 async function markRetrieved(taskId, driverId) {
-  const { task, slot, freedDriver } = await runSerializable(async (tx) => {
+  // Read Committed, same reasoning as markParked: this runs mid-transit
+  // while GPS pings are hitting this row, and Serializable would abort on
+  // that alone. Nothing here races for a scarce resource — it *frees* a
+  // slot rather than claiming one — so the stronger isolation bought
+  // nothing and cost the driver a spurious error at the counter.
+  const { task, slot, freedDriver } = await prisma.$transaction(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!task) throw ApiError.notFound('Task not found');
     assertOwnDriver(task, driverId);
@@ -608,13 +623,43 @@ async function confirmDelivered(taskId) {
 // caller (controller) — only the driver assigned to this task may update it.
 // The first ping since the last key_collected/in_transit transition becomes
 // the shared start-anchor every viewer computes trip progress from.
+// A phone sitting still still emits a fix every few seconds. Writing every
+// one of those to the task row is pure contention: it's the same row every
+// state transition (mark parked / retrieved / key collected) has to read, so
+// a constant stream of no-op writes is what was making those transitions
+// abort and surface "please try again". Skip writes that carry no new
+// information — under this threshold the stored position is already correct.
+const LOCATION_MIN_MOVE_M = 8;
+const LOCATION_MAX_STALE_MS = 20 * 1000;
+
+function metersBetween(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
 async function updateLocation(taskId, lat, lng, driverId) {
-  const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
+  const task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
   if (!task) throw ApiError.notFound('Task not found');
   assertOwnDriver(task, driverId);
   assertTransition(task, ['key_collected', 'in_transit'], 'report location');
 
   const isFirstPing = task.driverStartLat == null || task.driverStartLng == null;
+
+  // Always write the first ping (it sets the trip's start anchor) and any
+  // real movement; otherwise only refresh periodically so viewers can still
+  // tell the feed is alive rather than stalled.
+  if (!isFirstPing && task.driverLat != null && task.driverLng != null) {
+    const moved = metersBetween(task.driverLat, task.driverLng, lat, lng);
+    const age = Date.now() - (task.locationUpdatedAt?.getTime() ?? 0);
+    if (moved < LOCATION_MIN_MOVE_M && age < LOCATION_MAX_STALE_MS) {
+      return task;
+    }
+  }
 
   const updated = await prisma.parkingTask.update({
     where: { id: taskId },
@@ -709,7 +754,8 @@ async function recallTask(taskId) {
 // Driver: "car returned to the valet counter" — the recall's counterpart to
 // markParked. Frees the driver; the valet still has to confirm receipt.
 async function markReturned(taskId, driverId) {
-  const { task, freedDriver } = await runSerializable(async (tx) => {
+  // Read Committed — same mid-transit GPS contention as markParked/markRetrieved.
+  const { task, freedDriver } = await prisma.$transaction(async (tx) => {
     const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!existing) throw ApiError.notFound('Task not found');
     assertOwnDriver(existing, driverId);

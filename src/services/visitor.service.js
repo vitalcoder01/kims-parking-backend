@@ -201,7 +201,7 @@ async function acceptTask(visitorId, driverId) {
 // Driver: declined — immediate version of the accept-timeout rollback.
 async function rejectTask(visitorId, driverId) {
   watchdog.disarm('visitor', visitorId);
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await runSerializable(async (tx) => {
     const visitor = await tx.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
     if (!visitor) throw ApiError.notFound('Visitor not found');
     if (visitor.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this pickup');
@@ -249,7 +249,7 @@ async function markPickedUp(visitorId, driverId) {
 // Valet: cancel a pending visitor (no-show, valet cancelled, parking failed).
 async function cancelVisitor(visitorId, reason) {
   watchdog.disarm('visitor', visitorId);
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await runSerializable(async (tx) => {
     const visitor = await tx.visitor.findUnique({ where: { id: visitorId } });
     if (!visitor) throw ApiError.notFound('Visitor not found');
     assertTransition(visitor, ['pending'], 'cancel');
@@ -274,28 +274,49 @@ async function cancelVisitor(visitorId, reason) {
 // Driver: car has been parked. Slot may be omitted — the backend then
 // auto-assigns the next free slot (what the app's park call relies on).
 async function markParked(visitorId, slotId) {
-  // Serializable: at Read Committed two concurrent "auto-assign the next
-  // free slot" calls both resolve to the same first free slot and both
-  // write it, silently losing one car's occupancy record.
-  const { visitor, slot } = await runSerializable(async (tx) => {
+  // The slot race is handled by the conditional claim below rather than by
+  // isolation level — see markParked in task.service.js for why escalating
+  // to Serializable here would collide with in-flight GPS writes.
+  const { visitor, slot } = await prisma.$transaction(async (tx) => {
     const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
     if (!existing) throw ApiError.notFound('Visitor not found');
     assertTransition(existing, ['pending'], 'mark parked');
 
-    let slot;
+    // Conditional claim (`WHERE id = ? AND status = 'free'`) rather than
+    // read-then-write: it's atomic at Read Committed, so two concurrent
+    // auto-assigns can't both resolve to the same first free slot and both
+    // write it. On the auto-assign path a lost race just means trying the
+    // next candidate rather than failing the whole call.
+    let updatedSlot = null;
     if (slotId) {
-      slot = await tx.parkingSlot.findUnique({ where: { id: slotId } });
-      if (!slot) throw ApiError.badRequest(`Slot ${slotId} does not exist`);
-      if (slot.status !== 'free') throw ApiError.conflict(`Slot ${slotId} is not free`);
+      const exists = await tx.parkingSlot.findUnique({ where: { id: slotId } });
+      if (!exists) throw ApiError.badRequest(`Slot ${slotId} does not exist`);
+      const claimed = await tx.parkingSlot.updateMany({
+        where: { id: slotId, status: 'free' },
+        data: { status: 'occupied', carNumber: existing.carNumber },
+      });
+      if (claimed.count === 0) throw ApiError.conflict(`Slot ${slotId} is not free`);
+      updatedSlot = await tx.parkingSlot.findUnique({ where: { id: slotId } });
     } else {
-      slot = await tx.parkingSlot.findFirst({ where: { status: 'free' }, orderBy: [{ block: 'asc' }, { number: 'asc' }] });
-      if (!slot) throw ApiError.conflict('No free parking slots available');
+      const candidates = await tx.parkingSlot.findMany({
+        where: { status: 'free' },
+        orderBy: [{ block: 'asc' }, { number: 'asc' }],
+        take: 10,
+      });
+      if (candidates.length === 0) throw ApiError.conflict('No free parking slots available');
+      for (const candidate of candidates) {
+        const claimed = await tx.parkingSlot.updateMany({
+          where: { id: candidate.id, status: 'free' },
+          data: { status: 'occupied', carNumber: existing.carNumber },
+        });
+        if (claimed.count > 0) {
+          updatedSlot = await tx.parkingSlot.findUnique({ where: { id: candidate.id } });
+          break;
+        }
+      }
+      if (!updatedSlot) throw ApiError.conflict('No free parking slots available');
     }
-
-    const updatedSlot = await tx.parkingSlot.update({
-      where: { id: slot.id },
-      data: { status: 'occupied', carNumber: existing.carNumber },
-    });
+    const slot = updatedSlot;
 
     await freeDriverIfStillOn(tx, existing.driverId, visitorId);
 
@@ -396,7 +417,7 @@ async function assignRetrievalDriverLocked(visitorId, driverId) {
 // Driver: car handed back to the visitor at the valet counter — frees the
 // slot and the driver, closes out the visit.
 async function markRetrieved(visitorId) {
-  const { visitor, slot } = await prisma.$transaction(async (tx) => {
+  const { visitor, slot } = await runSerializable(async (tx) => {
     const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
     if (!existing) throw ApiError.notFound('Visitor not found');
     assertTransition(existing, ['parked'], 'mark retrieved');
