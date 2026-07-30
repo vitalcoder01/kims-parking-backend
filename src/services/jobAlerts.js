@@ -65,7 +65,27 @@ async function notifyOwnerOrAll({ valetId, title, body }) {
   return notificationService.push({ targetRole: 'valet', title, body, type: 'alarm' });
 }
 
+// Restarts the owning valet's escalation window. Used both when a job first
+// becomes stalled, and when the owner explicitly acknowledges the prompt —
+// tapping "Later" is them saying "seen it, I'll handle it", so broadcasting
+// to every valet moments later actively contradicts what they just told us.
+// It defers rather than cancels: ignore it for a full window and it still
+// escalates, because a real car with no driver can't be deferred forever.
+async function touchOwnerWindow(kind, id) {
+  const data = { valetClaimedAt: new Date(), escalatedAt: null };
+  const model = kind === 'task' ? prisma.parkingTask : prisma.visitor;
+  await model.update({ where: { id }, data }).catch(() => {});
+}
+
 async function alertTaskNeedsDriver(task, driverName, { rejected = false } = {}) {
+  // The owner's grace window starts NOW — the moment the job actually became
+  // stalled. valetClaimedAt was last stamped when they assigned the driver,
+  // and the driver then had the full accept window to respond, so by the time
+  // we get here that timestamp is already older than the escalation cutoff:
+  // the owner's window and the driver's ran concurrently instead of one after
+  // the other, and the sweep escalated to every valet within seconds of the
+  // owner being told. Re-stamping gives them their own window, from here.
+  await touchOwnerWindow('task', task.id);
   emitTaskReassign(task, driverName, rejected, task.valetId ? 'owner' : 'all');
   const why = rejected ? 'rejected the job' : "didn't accept in time";
   await notifyOwnerOrAll({
@@ -76,6 +96,7 @@ async function alertTaskNeedsDriver(task, driverName, { rejected = false } = {})
 }
 
 async function alertVisitorNeedsDriver(visitor, driverName, { rejected = false } = {}) {
+  await touchOwnerWindow('visitor', visitor.id);
   emitVisitorReassign(visitor, driverName, rejected, visitor.valetId ? 'owner' : 'all');
   const why = rejected ? 'rejected the job' : "didn't accept in time";
   await notifyOwnerOrAll({
@@ -179,6 +200,7 @@ function stopEscalationSweep() {
 }
 
 module.exports = {
+  touchOwnerWindow,
   alertTaskNeedsDriver,
   alertVisitorNeedsDriver,
   escalateStalledJobs,

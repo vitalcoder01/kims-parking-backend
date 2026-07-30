@@ -108,6 +108,14 @@ const retrieve = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Valet: "Later" on the reassign prompt — an explicit "seen it, I'll handle
+// it". Restarts their escalation window so the whole team isn't pulled in
+// seconds after they just told us they're on it.
+const acknowledge = asyncHandler(async (req, res) => {
+  await require('../services/jobAlerts').touchOwnerWindow('task', parseId(req.params.id));
+  res.json({ ok: true });
+});
+
 // Valet: abort a parking job the driver is already out on — they bring the
 // car back to the counter instead of parking it.
 const recall = asyncHandler(async (req, res) => {
@@ -146,4 +154,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };

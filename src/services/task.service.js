@@ -283,6 +283,21 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
           throw ApiError.conflict('That driver has already accepted this job — cancel it first to reassign');
         }
 
+        // One job, one valet. Without this, two valets who both received the
+        // same alert could each assign a driver: the second call is a
+        // perfectly ordinary "reassign" as far as every other check is
+        // concerned, so it silently bumped the first valet's driver off a job
+        // they'd just staffed.
+        //
+        // The claim is deliberately NOT permanent — it lifts once the job has
+        // escalated (escalatedAt set), which is the point at which the owner
+        // has had their window and the team is meant to pick it up. So a valet
+        // who logs off mid-job can't freeze a real car indefinitely.
+        if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt) {
+          const owner = await tx.user.findUnique({ where: { id: existing.valetId }, select: { name: true } });
+          throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`);
+        }
+
         const driver = await tx.driver.findUnique({ where: { id: driverId } });
         if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
         if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');

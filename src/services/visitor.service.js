@@ -138,6 +138,13 @@ async function assignDriver(visitorId, driverId, valetId) {
           throw ApiError.conflict('That driver has already accepted this pickup — cancel it first to reassign');
         }
 
+        // One pickup, one valet — see task.service.js assignDriver for why
+        // this lifts once the job has escalated rather than being permanent.
+        if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt) {
+          const owner = await tx.user.findUnique({ where: { id: existing.valetId }, select: { name: true } });
+          throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this pickup`);
+        }
+
         const driver = await tx.driver.findUnique({ where: { id: driverId } });
         if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
         if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
