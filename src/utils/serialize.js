@@ -109,6 +109,14 @@ function serializeArrivalNotice(n) {
     id: n.id,
     doctorId: n.doctorId,
     doctorName: n.doctor?.name,
+    // Lets the valet skip straight to driver assignment from this card
+    // (no code entry) when the plate's already on file — same "already
+    // known, don't ask again" rule the code-scan flow itself follows.
+    doctorCarNumber: n.doctor?.carNumber ?? undefined,
+    // Only needed for the "no plate on file yet" fallback screen (Path B
+    // skips the code lookup, so this is the only place left to get them).
+    doctorDepartment: n.doctor?.department ?? undefined,
+    doctorEmployeeId: n.doctor?.employeeId ?? undefined,
     eta: n.eta,
     createdAt: n.createdAt,
   };
