@@ -14,6 +14,15 @@ const DEFAULTS = {
   // destination, same as before this existed.
   parkingLotLat: '',
   parkingLotLng: '',
+  // Where a retrieved car is actually handed back — a fixed gate/entrance,
+  // same reasoning as the parking lot above. The doctor's own live GPS was
+  // used for this previously, but the app's own copy elsewhere ("CAR READY
+  // AT ENTRANCE — Please collect at the gate") already describes a fixed
+  // pickup point, not "wherever you're standing" — and capturing the
+  // doctor's phone GPS at request time was exactly as fragile as an
+  // emulator's default location was for parking.
+  valetGateLat: '',
+  valetGateLng: '',
 };
 
 const CACHE_TTL_MS = 5000;
@@ -41,12 +50,20 @@ async function getAcceptTimeoutMs() {
   return seconds * 1000;
 }
 
-async function getParkingLotDestination() {
+async function getFixedPoint(latKey, lngKey) {
   const all = await getAll();
-  const lat = Number(all.parkingLotLat);
-  const lng = Number(all.parkingLotLng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !all.parkingLotLat || !all.parkingLotLng) return null;
+  const lat = Number(all[latKey]);
+  const lng = Number(all[lngKey]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !all[latKey] || !all[lngKey]) return null;
   return { lat, lng };
+}
+
+async function getParkingLotDestination() {
+  return getFixedPoint('parkingLotLat', 'parkingLotLng');
+}
+
+async function getValetGateDestination() {
+  return getFixedPoint('valetGateLat', 'valetGateLng');
 }
 
 async function update(patch) {
@@ -62,4 +79,4 @@ async function update(patch) {
   return getAll();
 }
 
-module.exports = { getAll, get, getAcceptTimeoutMs, getParkingLotDestination, update, DEFAULTS };
+module.exports = { getAll, get, getAcceptTimeoutMs, getParkingLotDestination, getValetGateDestination, update, DEFAULTS };

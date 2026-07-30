@@ -186,6 +186,20 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
 // the ONLY way a retrieve task can come into existence — the valet cannot
 // invent one — so a driver never gets sent to pull a car nobody asked for.
 async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng }) {
+  // The car is actually handed back at a fixed gate/entrance (see the
+  // "CAR READY AT ENTRANCE — please collect at the gate" copy already
+  // shown to doctors), not wherever the doctor's phone happens to be
+  // standing at the moment they tap the button — that live-GPS capture was
+  // exactly as fragile as an emulator's default location was for parking,
+  // and could silently produce no destination at all on a GPS failure. Only
+  // fall back to it if a caller explicitly passed coordinates of their own.
+  let destLat = destinationLat ?? null;
+  let destLng = destinationLng ?? null;
+  if (destLat == null || destLng == null) {
+    const gate = await settingService.getValetGateDestination();
+    destLat = destLat ?? gate?.lat ?? null;
+    destLng = destLng ?? gate?.lng ?? null;
+  }
   const task = await runSerializable(async (tx) => {
     const slot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
     if (!slot) throw ApiError.badRequest('No parked car found for your account');
@@ -210,8 +224,8 @@ async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng 
         status: 'requested',
         requestedAt: new Date(),
         eta: eta ?? null,
-        destinationLat: destinationLat ?? null,
-        destinationLng: destinationLng ?? null,
+        destinationLat: destLat,
+        destinationLng: destLng,
         isCurrent: true,
       },
       include: taskInclude,
