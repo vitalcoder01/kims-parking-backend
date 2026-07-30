@@ -54,7 +54,13 @@ function emitVisitorReassign(visitor, driverName, rejected, scope) {
 // everyone — that's correct, not a fallback.
 async function notifyOwnerOrAll({ valetId, title, body }) {
   if (valetId) {
-    return notificationService.push({ targetRole: 'valet', targetUserId: valetId, title, body, type: 'alarm' });
+    // 'valet:<id>' — NOT plain 'valet'. A bare role name is a broadcast: both
+    // the socket fan-out and the FCM resolver expand it to every user with
+    // that role, which silently defeated the whole point of owning a job
+    // (and delivered it to the owner twice, once via each path).
+    return notificationService.push({
+      targetRole: `valet:${valetId}`, targetUserId: valetId, title, body, type: 'alarm',
+    });
   }
   return notificationService.push({ targetRole: 'valet', title, body, type: 'alarm' });
 }

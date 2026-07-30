@@ -4,6 +4,7 @@
 // to pick someone else. Lives server-side so it fires even if every phone
 // involved is locked in a pocket.
 const prisma = require('../config/database');
+const runSerializable = require('../utils/runSerializable');
 const cache = require('../utils/responseCache');
 const settingService = require('./setting.service');
 const notificationService = require('./notification.service');
@@ -82,7 +83,18 @@ async function rehydrate() {
 }
 
 async function fireTaskTimeout(taskId, driverId) {
-  const rolledBack = await prisma.$transaction(async (tx) => {
+  // MUST be serializable. The guard below ("has the driver accepted yet?")
+  // is only meaningful if it can't be invalidated between the read and the
+  // write — and acceptTask runs serializable, so at Read Committed the two
+  // simply don't serialize against each other:
+  //
+  //   accept  reads acceptedAt=null ... commits acceptedAt=now
+  //   timeout reads acceptedAt=null ......... commits driverId=null
+  //
+  // Both succeed, and the task ends up accepted-but-driverless: the driver
+  // sees the job vanish after they accepted it, while the valet is told
+  // "driver did not accept" and asked to reassign — repeatedly.
+  const rolledBack = await runSerializable(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
     // Only roll back if this exact assignment is still pending acceptance —
     // an accept, reject, reassign, or completion in the meantime wins.
@@ -94,7 +106,9 @@ async function fireTaskTimeout(taskId, driverId) {
       // Retrieve jobs fall back to 'requested' so they reappear in the
       // valet's Retrieval Requests list with its Assign button; park jobs
       // stay 'assigned' with no driver ("Waiting for driver").
-      data: { driverId: null, ...(task.type === 'retrieve' && { status: 'requested' }) },
+      // acceptedAt cleared too: a rolled-back assignment must leave no trace
+      // of an acceptance, or the next assign/accept reasons about a stale one.
+      data: { driverId: null, acceptedAt: null, ...(task.type === 'retrieve' && { status: 'requested' }) },
       include: taskInclude,
     });
     await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
@@ -114,14 +128,15 @@ async function fireTaskTimeout(taskId, driverId) {
 }
 
 async function fireVisitorTimeout(visitorId, driverId) {
-  const rolledBack = await prisma.$transaction(async (tx) => {
+  // Serializable for the same reason as fireTaskTimeout above.
+  const rolledBack = await runSerializable(async (tx) => {
     const visitor = await tx.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
     if (!visitor || visitor.driverId !== driverId || visitor.acceptedAt || visitor.status !== 'pending') return null;
 
     const driverName = visitor.driver?.user?.name ?? 'Driver';
     const updated = await tx.visitor.update({
       where: { id: visitorId },
-      data: { driverId: null, driverAssignedAt: null, trackingProgress: 0 },
+      data: { driverId: null, driverAssignedAt: null, acceptedAt: null, trackingProgress: 0 },
       include: visitorInclude,
     });
     await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });

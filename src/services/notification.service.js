@@ -34,9 +34,12 @@ function emitTargeted(targetRole, targetUserId, payload) {
   const [kind, scopedId] = targetRole.split(':');
   if (scopedId) {
     if (kind === 'driver') realtime.emitToDriver(scopedId, 'notification:new', payload);
-    // 'doctor:<userId>' style tags carry a user id; skip if already sent
-    // via targetUserId above.
-    else if (scopedId !== targetUserId) realtime.emitToUser(scopedId, 'notification:new', payload);
+    // '<role>:<userId>' style tags carry a user id; skip if already sent via
+    // targetUserId above. Compared as strings on purpose: scopedId comes out
+    // of a split() so it's always a string, while targetUserId is a number —
+    // a raw !== between them never matched, so this branch fired anyway and
+    // the recipient got the same notification (and alarm) twice.
+    else if (String(scopedId) !== String(targetUserId)) realtime.emitToUser(scopedId, 'notification:new', payload);
   } else {
     realtime.emitToRoles([kind], 'notification:new', payload);
   }
