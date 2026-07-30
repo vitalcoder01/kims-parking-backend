@@ -97,6 +97,7 @@ async function updateVisitor(id, patch) {
 // visitor's car. Starts the accept countdown — the driver must confirm on
 // their phone or the valet is prompted to reassign.
 async function assignDriver(visitorId, driverId) {
+  let previousDriverId = null;
   const visitor = await prisma.$transaction(async (tx) => {
     const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
     if (!existing) throw ApiError.notFound('Visitor not found');
@@ -114,12 +115,24 @@ async function assignDriver(visitorId, driverId) {
 
     await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
 
+    // Same fix as task.service.js's assignDriver: reassigning away from
+    // whoever had this before their accept/reject ever ran must free them
+    // too, or they're stuck 'busy' forever on a job that's no longer theirs.
+    if (existing.driverId && existing.driverId !== driverId) {
+      const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
+      if (oldDriver?.currentTaskId === visitorId) {
+        await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
+        previousDriverId = existing.driverId;
+      }
+    }
+
     return updated;
   });
   cache.invalidate('visitors:');
   cache.invalidate('drivers:');
   emitVisitor(visitor);
   emitDriverPatch(driverId, 'busy', visitorId);
+  if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
   await watchdog.arm('visitor', visitorId, driverId);
   return visitor;
 }

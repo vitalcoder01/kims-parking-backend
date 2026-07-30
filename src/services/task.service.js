@@ -212,6 +212,7 @@ async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng 
 // Valet: assigns an available driver to a requested (or already-assigned,
 // e.g. reassigning) task.
 async function assignDriver(taskId, driverId) {
+  let previousDriverId = null;
   const task = await runSerializable(async (tx) => {
     const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!existing) throw ApiError.notFound('Task not found');
@@ -233,14 +234,32 @@ async function assignDriver(taskId, driverId) {
       data: { status: 'busy', currentTaskId: taskId },
     });
 
+    // Reassigning away from whoever had it before (accept-timeout and
+    // reject already free the old driver themselves before this ever runs,
+    // but a valet picking a different driver mid-assignment — before the
+    // first one ever accepted or rejected — otherwise leaves that driver
+    // stuck 'busy' on a task that's no longer theirs, forever, since
+    // nothing else ever revisits it. Only clear them if that driver isn't
+    // busy on some OTHER job too (currentTaskId still points at this task).
+    if (existing.driverId && existing.driverId !== driverId) {
+      const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
+      if (oldDriver?.currentTaskId === taskId) {
+        await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
+        previousDriverId = existing.driverId;
+      }
+    }
+
     return updated;
   });
   cache.invalidate('tasks:');
   cache.invalidate('drivers:');
   emitTask(task);
   emitDriverPatch(driverId, 'busy', taskId);
+  if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
   // Countdown for the driver to accept — on expiry the valet is prompted
-  // to reassign (see acceptWatchdog.js).
+  // to reassign (see acceptWatchdog.js). Any countdown still running for
+  // the driver just bumped off this task is superseded by this same call
+  // (arm() disarms whatever timer already existed for this task id).
   await watchdog.arm('task', taskId, driverId);
   return task;
 }
