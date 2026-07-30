@@ -80,22 +80,14 @@ const keyCollected = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
-// Only the driver actually assigned to a task may drive its own stages
-// forward — updateLocation already enforced this; in_transit/park/retrieve
-// didn't, which meant any authenticated driver could in principle progress
-// (or corrupt) a job that was never assigned to them.
-async function assertOwnDriverTask(req, id) {
-  const task = await taskService.getTask(id);
-  if (req.user.role !== 'admin' && task.driverId !== req.user.driver?.id) {
-    throw ApiError.forbidden('You are not the driver assigned to this task');
-  }
-  return task;
-}
+// Ownership is enforced inside the services now (assertOwnDriver), so it
+// holds for every caller rather than only the routes that remembered to
+// check. Admins pass `undefined` to opt out — they're allowed to act on any
+// job, which is exactly the distinction the services can't make themselves.
+const callerDriverId = (req) => (req.user.role === 'admin' ? undefined : req.user.driver?.id ?? null);
 
 const inTransit = asyncHandler(async (req, res) => {
-  const id = parseId(req.params.id);
-  await assertOwnDriverTask(req, id);
-  const task = await taskService.markInTransit(id);
+  const task = await taskService.markInTransit(parseId(req.params.id), callerDriverId(req));
   await attendanceService.ensurePresent(req.user.id).catch(() => {});
   res.json({ task: serializeTask(task) });
 });
@@ -104,16 +96,25 @@ const park = asyncHandler(async (req, res) => {
   const { slotId } = req.body;
   if (!slotId) throw ApiError.badRequest('slotId is required');
 
-  const id = parseId(req.params.id);
-  await assertOwnDriverTask(req, id);
-  const task = await taskService.markParked(id, slotId);
+  const task = await taskService.markParked(parseId(req.params.id), slotId, callerDriverId(req));
   res.json({ task: serializeTask(task) });
 });
 
 const retrieve = asyncHandler(async (req, res) => {
-  const id = parseId(req.params.id);
-  await assertOwnDriverTask(req, id);
-  const task = await taskService.markRetrieved(id);
+  const task = await taskService.markRetrieved(parseId(req.params.id), callerDriverId(req));
+  res.json({ task: serializeTask(task) });
+});
+
+// Valet: abort a parking job the driver is already out on — they bring the
+// car back to the counter instead of parking it.
+const recall = asyncHandler(async (req, res) => {
+  const task = await taskService.recallTask(parseId(req.params.id));
+  res.json({ task: serializeTask(task) });
+});
+
+// Driver: "car returned to the valet counter" after a recall.
+const markReturned = asyncHandler(async (req, res) => {
+  const task = await taskService.markReturned(parseId(req.params.id), callerDriverId(req));
   res.json({ task: serializeTask(task) });
 });
 
@@ -138,14 +139,8 @@ const updateLocation = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('lat and lng (numbers) are required');
   }
 
-  const id = parseId(req.params.id);
-  const task = await taskService.getTask(id);
-  if (req.user.role !== 'admin' && task.driverId !== req.user.driver?.id) {
-    throw ApiError.forbidden('You are not the driver assigned to this task');
-  }
-
-  const updated = await taskService.updateLocation(id, lat, lng);
+  const updated = await taskService.updateLocation(parseId(req.params.id), lat, lng, callerDriverId(req));
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, updateLocation };

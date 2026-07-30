@@ -25,6 +25,7 @@ function serializeTask(task) {
     keyCollectedAt: task.keyCollectedAt,
     completedAt: task.completedAt,
     acceptedAt: task.acceptedAt ?? undefined,
+    recalledAt: task.recalledAt ?? undefined,
     eta: task.eta ?? undefined,
     trackingProgress: task.trackingProgress ?? undefined,
     driverLat: task.driverLat ?? undefined,

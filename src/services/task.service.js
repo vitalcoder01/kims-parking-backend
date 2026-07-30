@@ -4,6 +4,9 @@ const cache = require('../utils/responseCache');
 const realtime = require('../realtime');
 const watchdog = require('./acceptWatchdog');
 const arrivalNoticeService = require('./arrivalNotice.service');
+const notificationService = require('./notification.service');
+const assignLocks = require('./assignLocks');
+const runSerializable = require('../utils/runSerializable');
 const { serializeTask, serializeSlot } = require('../utils/serialize');
 
 // Realtime deltas: every mutation below emits the changed entity itself so
@@ -16,24 +19,6 @@ function emitDriverPatch(id, status, currentTaskId) {
 }
 function emitSlot(slot) {
   realtime.emitAll('slot:patch', serializeSlot(slot));
-}
-
-// Read Committed (Postgres/Prisma's default) lets two concurrent
-// transactions both read "not taken yet" before either writes — e.g. two
-// valets assigning two different tasks to the same driver at the same
-// instant, or a doctor double-tapping "Request Retrieval". Serializable
-// makes Postgres abort the loser with a real conflict error instead of
-// silently letting both succeed; this maps that abort to a friendly
-// "try again" instead of a raw 500.
-async function runSerializable(fn) {
-  try {
-    return await prisma.$transaction(fn, { isolationLevel: 'Serializable' });
-  } catch (err) {
-    if (err.code === 'P2034') {
-      throw ApiError.conflict('That just changed under you — please try again');
-    }
-    throw err;
-  }
 }
 
 const CACHE_TTL_MS = 2500;
@@ -50,6 +35,18 @@ const taskInclude = {
 function assertTransition(task, allowed, action) {
   if (!allowed.includes(task.status)) {
     throw ApiError.conflict(`Cannot ${action} — task is currently "${task.status}"`);
+  }
+}
+
+// Only the driver actually holding a job may drive its stages forward. This
+// lives here rather than only in the controller so it holds for every caller
+// of these services, not just the one HTTP route that remembered to check.
+// `driverId` undefined means an admin/system caller and is allowed through —
+// the controller is what decides whether the request is admin-privileged.
+function assertOwnDriver(task, driverId) {
+  if (driverId === undefined) return;
+  if (task.driverId !== driverId) {
+    throw ApiError.forbidden('You are not the driver assigned to this task');
   }
 }
 
@@ -80,6 +77,23 @@ async function listTasks({ doctorId, driverId, status, type, history } = {}) {
     orderBy: { createdAt: 'desc' },
     take: DEFAULT_TASK_LIMIT,
   }));
+}
+
+// Releases a driver ONLY if they're still actually on the job in question.
+// Every "this job is over, free the driver" path used to blank the driver's
+// status/currentTaskId unconditionally — so finishing or cancelling an old
+// job would mark a driver available even when they'd since been assigned a
+// newer one and were genuinely out on it. Returns whether it freed them, so
+// callers know whether to emit a driver patch.
+async function freeDriverIfStillOn(tx, driverId, jobId) {
+  if (!driverId) return false;
+  const driver = await tx.driver.findUnique({ where: { id: driverId } });
+  // currentTaskId null means nothing else has claimed them — safe to reset
+  // (this is the normal path; it's only non-null-and-different that's a
+  // driver who has genuinely moved on to another job).
+  if (driver && driver.currentTaskId != null && driver.currentTaskId !== jobId) return false;
+  await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
+  return true;
 }
 
 // Retires whatever this doctor's current row is (if any) so a new one can
@@ -199,8 +213,12 @@ async function requestRetrieval({ doctorId, eta }) {
     const slot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
     if (!slot) throw ApiError.badRequest('No parked car found for your account');
 
+    // Only a still-live retrieval blocks a new one. 'cancelled' has to be
+    // excluded alongside 'completed': it's equally terminal, and treating it
+    // as "still pending" meant one cancelled retrieval locked that car out
+    // of ever being requested again, permanently, with no way back.
     const existing = await tx.parkingTask.findFirst({
-      where: { slotId: slot.id, type: 'retrieve', status: { not: 'completed' } },
+      where: { slotId: slot.id, type: 'retrieve', status: { notIn: ['completed', 'cancelled'] } },
     });
     if (existing) throw ApiError.conflict('Retrieval has already been requested for this car');
 
@@ -233,105 +251,139 @@ async function requestRetrieval({ doctorId, eta }) {
 
 // Valet: assigns an available driver to a requested (or already-assigned,
 // e.g. reassigning) task.
-// Backend-side lock mirroring the frontend's "disable while assigning" —
-// but closing the gap the frontend guard alone can't: two requests from
-// different devices/sessions, or any client that isn't this app's UI at
-// all. Node is single-threaded and there's no `await` between the check
-// and the add, so two calls that arrive back-to-back for the SAME task
-// can never both pass this check — the second is rejected outright instead
-// of racing the first's transaction (which, if it already committed, would
-// otherwise look like a perfectly valid reassignment).
-const assigningTasks = new Set();
-
 async function assignDriver(taskId, driverId, valetLocation) {
-  if (assigningTasks.has(taskId)) {
-    throw ApiError.conflict('This job is already being assigned to a driver');
-  }
-  assigningTasks.add(taskId);
-  try {
-    let previousDriverId = null;
-    const task = await runSerializable(async (tx) => {
-      const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
-      if (!existing) throw ApiError.notFound('Task not found');
-      assertTransition(existing, ['requested', 'assigned'], 'assign a driver');
+  // Locks BOTH sides of the assignment: the job (so two valets can't both
+  // assign this same job) and the driver (so two valets can't both grab
+  // this same driver for two different jobs — a per-task lock alone let
+  // that straight through, since the task ids differ). Shared with
+  // visitor.service.js via assignLocks so a parking task and a visitor
+  // pickup can't claim the same driver concurrently either.
+  return assignLocks.withLocks(
+    [assignLocks.taskKey(taskId), assignLocks.driverKey(driverId)],
+    'This job or driver is already being assigned',
+    async () => {
+      let previousDriverId = null;
+      const task = await runSerializable(async (tx) => {
+        const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
+        if (!existing) throw ApiError.notFound('Task not found');
+        assertTransition(existing, ['requested', 'assigned'], 'assign a driver');
 
-      const driver = await tx.driver.findUnique({ where: { id: driverId } });
-      if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-      if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
-
-      // A retrieve task's real destination is wherever the valet assigning
-      // this driver happens to be standing right now — the actual physical
-      // handover point. Naturally supports multiple valets (each one's own
-      // location, not one shared fixed point) since it's captured fresh on
-      // every assignment rather than configured once somewhere central.
-      const dest = existing.type === 'retrieve' && valetLocation
-        ? { destinationLat: valetLocation.lat, destinationLng: valetLocation.lng }
-        : {};
-
-      const updated = await tx.parkingTask.update({
-        where: { id: taskId },
-        // A (re)assignment restarts the accept handshake from scratch.
-        data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest },
-        include: taskInclude,
-      });
-
-      await tx.driver.update({
-        where: { id: driverId },
-        data: { status: 'busy', currentTaskId: taskId },
-      });
-
-      // Reassigning away from whoever had it before (accept-timeout and
-      // reject already free the old driver themselves before this ever runs,
-      // but a valet picking a different driver mid-assignment — before the
-      // first one ever accepted or rejected — otherwise leaves that driver
-      // stuck 'busy' on a task that's no longer theirs, forever, since
-      // nothing else ever revisits it. Only clear them if that driver isn't
-      // busy on some OTHER job too (currentTaskId still points at this task).
-      if (existing.driverId && existing.driverId !== driverId) {
-        const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
-        if (oldDriver?.currentTaskId === taskId) {
-          await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
-          previousDriverId = existing.driverId;
+        // Once a driver has explicitly accepted, the job is theirs — silently
+        // moving it to someone else left the first driver's app showing a job
+        // that was no longer theirs, with no signal anything had changed. To
+        // hand it to someone else the valet has to cancel it first, which is
+        // a deliberate, visible action rather than an invisible override.
+        if (existing.acceptedAt && existing.driverId && existing.driverId !== driverId) {
+          throw ApiError.conflict('That driver has already accepted this job — cancel it first to reassign');
         }
-      }
 
-      return updated;
-    });
-    cache.invalidate('tasks:');
-    cache.invalidate('drivers:');
-    emitTask(task);
-    emitDriverPatch(driverId, 'busy', taskId);
-    if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
-    // Countdown for the driver to accept — on expiry the valet is prompted
-    // to reassign (see acceptWatchdog.js). Any countdown still running for
-    // the driver just bumped off this task is superseded by this same call
-    // (arm() disarms whatever timer already existed for this task id).
-    await watchdog.arm('task', taskId, driverId);
-    return task;
-  } finally {
-    assigningTasks.delete(taskId);
-  }
+        const driver = await tx.driver.findUnique({ where: { id: driverId } });
+        if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
+        if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
+
+        // A retrieve task's real destination is wherever the valet assigning
+        // this driver happens to be standing right now — the actual physical
+        // handover point. Naturally supports multiple valets (each one's own
+        // location, not one shared fixed point) since it's captured fresh on
+        // every assignment rather than configured once somewhere central.
+        const dest = existing.type === 'retrieve' && valetLocation
+          ? { destinationLat: valetLocation.lat, destinationLng: valetLocation.lng }
+          : {};
+
+        const updated = await tx.parkingTask.update({
+          where: { id: taskId },
+          // A (re)assignment restarts the accept handshake from scratch.
+          data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest },
+          include: taskInclude,
+        });
+
+        await tx.driver.update({
+          where: { id: driverId },
+          data: { status: 'busy', currentTaskId: taskId },
+        });
+
+        // Reassigning away from whoever had it before (accept-timeout and
+        // reject already free the old driver themselves before this ever runs,
+        // but a valet picking a different driver mid-assignment — before the
+        // first one ever accepted or rejected — otherwise leaves that driver
+        // stuck 'busy' on a task that's no longer theirs, forever, since
+        // nothing else ever revisits it. Only clear them if that driver isn't
+        // busy on some OTHER job too (currentTaskId still points at this task).
+        if (existing.driverId && existing.driverId !== driverId) {
+          const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
+          if (oldDriver?.currentTaskId === taskId) {
+            await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
+            previousDriverId = existing.driverId;
+          }
+        }
+
+        return updated;
+      });
+      cache.invalidate('tasks:');
+      cache.invalidate('drivers:');
+      emitTask(task);
+      emitDriverPatch(driverId, 'busy', taskId);
+      if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
+      // Alerting the driver is this operation's job, not the calling app's.
+      // It used to be fired client-side right after this call returned, so a
+      // valet whose phone died (or lost signal) in that gap left a real
+      // assignment sitting there that the driver was never told about.
+      notifyDriverAssigned(task).catch(() => {});
+      // Countdown for the driver to accept — on expiry the valet is prompted
+      // to reassign (see acceptWatchdog.js). Any countdown still running for
+      // the driver just bumped off this task is superseded by this same call
+      // (arm() disarms whatever timer already existed for this task id).
+      await watchdog.arm('task', taskId, driverId);
+      return task;
+    },
+  );
+}
+
+// Server-side assignment alert — see the call site above for why this can't
+// live in the client.
+function notifyDriverAssigned(task) {
+  const isRetrieve = task.type === 'retrieve';
+  return notificationService.push({
+    // targetRole alone fully identifies the recipient — the backend resolves
+    // 'driver:<id>' to that driver's user id. Do NOT also pass targetUserId:
+    // Driver.id and User.id are separate sequences that can collide.
+    targetRole: `driver:${task.driverId}`,
+    title: isRetrieve ? '🔔 Retrieval Task!' : '🔔 Task Assigned!',
+    body: isRetrieve
+      ? `Retrieve ${task.carNumber} from slot ${task.slotId} for ${task.doctor?.name ?? 'staff'}.`
+      : `Collect key from valet for ${task.doctor?.name ?? 'staff'}'s car (${task.carNumber}).`,
+    type: 'alarm',
+  });
 }
 
 // Driver: explicit "I've got it" on the assignment alert. Stops the accept
 // watchdog; the task stays 'assigned' (the valet's "Mark Key Handed to
 // Driver" step is what moves it forward) but now shows an accepted driver.
 async function acceptTask(taskId, driverId) {
-  const task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
-  if (!task) throw ApiError.notFound('Task not found');
-  if (task.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this task');
-  assertTransition(task, ['assigned'], 'accept');
-  if (task.acceptedAt) return task;
+  // Read-then-write has to be one atomic step: the valet can be cancelling
+  // (or reassigning) this exact task at the same moment, and a plain
+  // findUnique + update would happily write an acceptedAt onto a task that
+  // had already moved out from under it between the two statements.
+  const { task, alreadyAccepted } = await runSerializable(async (tx) => {
+    const existing = await tx.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
+    if (!existing) throw ApiError.notFound('Task not found');
+    if (existing.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this task');
+    assertTransition(existing, ['assigned'], 'accept');
+    if (existing.acceptedAt) return { task: existing, alreadyAccepted: true };
+
+    const updated = await tx.parkingTask.update({
+      where: { id: taskId },
+      data: { acceptedAt: new Date() },
+      include: taskInclude,
+    });
+    return { task: updated, alreadyAccepted: false };
+  });
+  if (alreadyAccepted) return task;
 
   watchdog.disarm('task', taskId);
-  const updated = await prisma.parkingTask.update({
-    where: { id: taskId },
-    data: { acceptedAt: new Date() },
-    include: taskInclude,
-  });
   cache.invalidate('tasks:');
-  emitTask(updated);
-  return updated;
+  emitTask(task);
+  return task;
 }
 
 // Driver: declined the assignment — same rollback the accept timeout does,
@@ -351,7 +403,10 @@ async function rejectTask(taskId, driverId) {
       data: { driverId: null, acceptedAt: null, ...(task.type === 'retrieve' && { status: 'requested' }) },
       include: taskInclude,
     });
-    await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
+    // Only release this driver if they're still actually on THIS job — if
+    // they've since been assigned something else, blanking currentTaskId
+    // here would mark them free while they're genuinely out on that newer job.
+    await freeDriverIfStillOn(tx, driverId, taskId);
     return { updated, driverName };
   });
   cache.invalidate('tasks:');
@@ -398,11 +453,18 @@ async function markKeyCollected(taskId) {
 // Driver: en route — for park tasks this follows key_collected; for retrieve
 // tasks (no key handoff step) this is the driver's own "Start Retrieval" tap
 // straight from "assigned", so it also clears the GPS start-anchor.
-async function markInTransit(taskId) {
+async function markInTransit(taskId, driverId) {
   const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
   if (!task) throw ApiError.notFound('Task not found');
+  assertOwnDriver(task, driverId);
   const allowed = task.type === 'retrieve' ? ['assigned', 'key_collected'] : ['key_collected'];
   assertTransition(task, allowed, 'start transit');
+  // A retrieve task starts here directly from 'assigned' (there's no key
+  // handoff step to gate it), so this is the only place that can enforce
+  // the accept handshake for that path — without it a driver who never
+  // accepted could still start driving, leaving the watchdog to "time out"
+  // an assignment that's actually already underway.
+  if (!task.acceptedAt) throw ApiError.conflict('Accept this job before starting it');
 
   const updated = await prisma.parkingTask.update({
     where: { id: taskId },
@@ -416,12 +478,21 @@ async function markInTransit(taskId) {
 }
 
 // Driver: "Mark Parked" — occupies the slot, frees the driver, completes the task.
-async function markParked(taskId, slotId) {
-  const { task, slot } = await prisma.$transaction(async (tx) => {
+async function markParked(taskId, slotId, driverId) {
+  // Serializable, not the default Read Committed: two drivers marking
+  // parked into the same slot at the same instant would otherwise both read
+  // it as free and both write, silently losing one car's slot record.
+  const { task, slot, freedDriver } = await runSerializable(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!task) throw ApiError.notFound('Task not found');
+    assertOwnDriver(task, driverId);
     if (task.type !== 'park') throw ApiError.conflict('Only park tasks can be marked parked');
     assertTransition(task, ['key_collected', 'in_transit'], 'mark parked');
+    // The valet pulled this job back mid-drive — the car is supposed to be
+    // coming back to the counter, not going into a slot.
+    if (task.recalledAt) {
+      throw ApiError.conflict('This job was recalled — bring the car back to the valet counter instead');
+    }
 
     const slot = await tx.parkingSlot.findUnique({ where: { id: slotId } });
     if (!slot) throw ApiError.badRequest(`Slot ${slotId} does not exist`);
@@ -437,46 +508,44 @@ async function markParked(taskId, slotId) {
       },
     });
 
-    if (task.driverId) {
-      await tx.driver.update({
-        where: { id: task.driverId },
-        data: { status: 'available', currentTaskId: null },
-      });
-    }
+    const freed = await freeDriverIfStillOn(tx, task.driverId, taskId);
 
     const updatedTask = await tx.parkingTask.update({
       where: { id: taskId },
       data: { slotId, status: 'completed', completedAt: new Date(), trackingProgress: 1 },
       include: taskInclude,
     });
-    return { task: updatedTask, slot: updatedSlot };
+    return { task: updatedTask, slot: updatedSlot, freedDriver: freed };
   });
   cache.invalidate('tasks:');
   cache.invalidate('slots:');
   cache.invalidate('drivers:');
   emitTask(task);
   emitSlot(slot);
-  if (task.driverId) emitDriverPatch(task.driverId, 'available', null);
+  if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
   return task;
 }
 
 // Driver: "Car Delivered to Valet Counter" — frees the slot, frees the driver.
-async function markRetrieved(taskId) {
-  const { task, slot } = await prisma.$transaction(async (tx) => {
+async function markRetrieved(taskId, driverId) {
+  const { task, slot, freedDriver } = await runSerializable(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!task) throw ApiError.notFound('Task not found');
+    assertOwnDriver(task, driverId);
     if (task.type !== 'retrieve') throw ApiError.conflict('Only retrieve tasks can be marked retrieved');
     assertTransition(task, ['in_transit'], 'mark retrieved');
     let freedSlot = null;
 
-    // Only free the slot if the car actually sitting there matches this
-    // retrieval — slot.taskId still points at the original *park* task (a
-    // retrieve task is a separate row), so taskId can never match `task.id`
-    // here; carNumber is the real invariant that proves this is genuinely
-    // the same car and not some unrelated/bad-data occupancy.
+    // Free the slot this retrieval was raised against. It used to also
+    // require slot.carNumber === task.carNumber, which meant any drift in
+    // the plate (an edit, different spacing/case) silently skipped the
+    // release and stranded that slot as permanently occupied with nothing
+    // able to free it again. The slot recorded on the task IS the authority
+    // for which slot this retrieval empties; matching on doctorId keeps the
+    // sanity check without being defeated by plate formatting.
     if (task.slotId) {
       const slot = await tx.parkingSlot.findUnique({ where: { id: task.slotId } });
-      if (slot?.status === 'occupied' && slot.carNumber === task.carNumber) {
+      if (slot?.status === 'occupied' && slot.doctorId === task.doctorId) {
         freedSlot = await tx.parkingSlot.update({
           where: { id: task.slotId },
           data: { status: 'free', taskId: null, carNumber: null, doctorId: null },
@@ -484,12 +553,7 @@ async function markRetrieved(taskId) {
       }
     }
 
-    if (task.driverId) {
-      await tx.driver.update({
-        where: { id: task.driverId },
-        data: { status: 'available', currentTaskId: null },
-      });
-    }
+    const freed = await freeDriverIfStillOn(tx, task.driverId, taskId);
 
     const updatedTask = await tx.parkingTask.update({
       where: { id: taskId },
@@ -498,14 +562,14 @@ async function markRetrieved(taskId) {
       data: { status: 'delivered', trackingProgress: 0.95 },
       include: taskInclude,
     });
-    return { task: updatedTask, slot: freedSlot };
+    return { task: updatedTask, slot: freedSlot, freedDriver: freed };
   });
   cache.invalidate('tasks:');
   cache.invalidate('slots:');
   cache.invalidate('drivers:');
   emitTask(task);
   if (slot) emitSlot(slot);
-  if (task.driverId) emitDriverPatch(task.driverId, 'available', null);
+  if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
   return task;
 }
 
@@ -516,12 +580,23 @@ async function markRetrieved(taskId) {
 async function confirmDelivered(taskId) {
   const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
   if (!task) throw ApiError.notFound('Task not found');
-  if (task.type !== 'retrieve') throw ApiError.conflict('Only retrieve tasks can be confirmed delivered');
-  assertTransition(task, ['delivered'], 'confirm handed to owner');
+  // A recalled park job also lands at 'delivered' (car brought back to the
+  // counter) and needs the same confirmation — but its outcome is
+  // 'cancelled', not 'completed': the car was never actually parked, so
+  // recording it as a completed parking job would be a lie in the history.
+  const isRecalledPark = task.type === 'park' && task.recalledAt != null;
+  if (task.type !== 'retrieve' && !isRecalledPark) {
+    throw ApiError.conflict('Only a retrieval or a recalled parking job can be confirmed');
+  }
+  assertTransition(task, ['delivered'], 'confirm handed over');
 
   const updated = await prisma.parkingTask.update({
     where: { id: taskId },
-    data: { status: 'completed', completedAt: new Date(), trackingProgress: 1 },
+    data: {
+      status: isRecalledPark ? 'cancelled' : 'completed',
+      completedAt: new Date(),
+      trackingProgress: 1,
+    },
     include: taskInclude,
   });
   cache.invalidate('tasks:');
@@ -533,9 +608,10 @@ async function confirmDelivered(taskId) {
 // caller (controller) — only the driver assigned to this task may update it.
 // The first ping since the last key_collected/in_transit transition becomes
 // the shared start-anchor every viewer computes trip progress from.
-async function updateLocation(taskId, lat, lng) {
+async function updateLocation(taskId, lat, lng, driverId) {
   const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
   if (!task) throw ApiError.notFound('Task not found');
+  assertOwnDriver(task, driverId);
   assertTransition(task, ['key_collected', 'in_transit'], 'report location');
 
   const isFirstPing = task.driverStartLat == null || task.driverStartLng == null;
@@ -561,10 +637,14 @@ async function updateLocation(taskId, lat, lng) {
 // instead of a silent one.
 async function cancelTask(taskId) {
   const task = await getTask(taskId);
-  assertTransition(task, ['requested', 'assigned', 'key_collected', 'in_transit', 'delivered'], 'cancel');
+  // Past the key handover a plain cancel isn't honest: a real car is
+  // physically in a driver's hands. Those go through recallTask instead,
+  // which tells the driver to bring it back rather than silently voiding a
+  // job that's already in motion.
+  assertTransition(task, ['requested', 'assigned'], 'cancel');
   watchdog.disarm('task', taskId);
 
-  const updated = await runSerializable(async tx => {
+  const { updated, freedDriver } = await runSerializable(async tx => {
     const result = await tx.parkingTask.update({
       where: { id: taskId },
       data: { status: 'cancelled', completedAt: new Date() },
@@ -572,19 +652,90 @@ async function cancelTask(taskId) {
     });
     // A driver left mid-assignment would otherwise stay stuck 'busy' on a
     // task that no longer exists in any meaningful sense.
-    if (task.driverId) {
-      await tx.driver.update({ where: { id: task.driverId }, data: { status: 'available', currentTaskId: null } });
-    }
-    return result;
+    const freed = await freeDriverIfStillOn(tx, task.driverId, taskId);
+    return { updated: result, freedDriver: freed };
   });
 
   cache.invalidate('tasks:');
-  if (task.driverId) {
+  if (freedDriver && task.driverId) {
     cache.invalidate('drivers:');
     emitDriverPatch(task.driverId, 'available', null);
   }
   emitTask(updated);
   return updated;
+}
+
+// Valet: abort a park job the driver is already out on — "don't park it,
+// bring it back". The car physically exists in someone's hands, so this
+// can't just blank the record: the driver is told to return it, marks it
+// returned at the counter (markReturned -> 'delivered'), and the valet
+// confirms they physically have it back (confirmDelivered -> 'cancelled').
+// Same two-step handshake a retrieval already uses, for the same reason.
+async function recallTask(taskId) {
+  const task = await getTask(taskId);
+  if (task.type !== 'park') throw ApiError.conflict('Only a parking job can be recalled');
+  assertTransition(task, ['key_collected', 'in_transit'], 'recall');
+  if (task.recalledAt) throw ApiError.conflict('This job has already been recalled');
+
+  const updated = await prisma.parkingTask.update({
+    where: { id: taskId },
+    data: { recalledAt: new Date() },
+    include: taskInclude,
+  });
+  cache.invalidate('tasks:');
+  emitTask(updated);
+
+  if (updated.driverId) {
+    notificationService.push({
+      targetRole: `driver:${updated.driverId}`,
+      title: '🔔 Job Recalled — Bring the Car Back',
+      body: `Do not park ${updated.carNumber}. Return it to the valet counter.`,
+      type: 'alarm',
+    }).catch(() => {});
+  }
+  // Their Vehicle Status card is showing "being parked" — without this it
+  // would just silently revert with no explanation of where the car went.
+  notificationService.push({
+    targetRole: `doctor:${updated.doctorId}`,
+    targetUserId: updated.doctorId,
+    title: 'Parking Cancelled',
+    body: `${updated.carNumber} is being brought back to the valet counter instead of parked.`,
+    type: 'warning',
+  }).catch(() => {});
+
+  return updated;
+}
+
+// Driver: "car returned to the valet counter" — the recall's counterpart to
+// markParked. Frees the driver; the valet still has to confirm receipt.
+async function markReturned(taskId, driverId) {
+  const { task, freedDriver } = await runSerializable(async (tx) => {
+    const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
+    if (!existing) throw ApiError.notFound('Task not found');
+    assertOwnDriver(existing, driverId);
+    if (!existing.recalledAt) throw ApiError.conflict('This job was not recalled');
+    assertTransition(existing, ['key_collected', 'in_transit'], 'mark returned');
+
+    const freed = await freeDriverIfStillOn(tx, existing.driverId, taskId);
+    const updated = await tx.parkingTask.update({
+      where: { id: taskId },
+      data: { status: 'delivered', trackingProgress: 1 },
+      include: taskInclude,
+    });
+    return { task: updated, freedDriver: freed };
+  });
+  cache.invalidate('tasks:');
+  cache.invalidate('drivers:');
+  emitTask(task);
+  if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
+
+  notificationService.push({
+    targetRole: 'valet',
+    title: '🔔 Recalled Car Returned — Confirm',
+    body: `${task.carNumber} is back at the counter. Confirm once you have the key.`,
+    type: 'alarm',
+  }).catch(() => {});
+  return task;
 }
 
 module.exports = {
@@ -601,5 +752,7 @@ module.exports = {
   markRetrieved,
   confirmDelivered,
   cancelTask,
+  recallTask,
+  markReturned,
   updateLocation,
 };

@@ -13,9 +13,10 @@ const { serializeTask, serializeVisitor } = require('../utils/serialize');
 const taskInclude = { doctor: true, driver: { include: { user: true } } };
 const visitorInclude = { driver: { include: { user: true } } };
 
-// One pending timer per job. In-memory is fine: a server restart only loses
-// in-flight countdowns, and those assignments simply wait for the valet to
-// notice via the (still-visible) "waiting for driver" state.
+// One pending timer per job. These live in memory, so a restart would
+// otherwise drop every in-flight countdown on the floor — leaving those
+// assignments pending forever with no timeout and no reassign prompt, since
+// nothing else ever revisits them. rehydrate() below re-arms them at boot.
 const timers = new Map();
 
 function key(kind, id) { return `${kind}:${id}`; }
@@ -26,9 +27,9 @@ function disarm(kind, id) {
   if (t) { clearTimeout(t); timers.delete(k); }
 }
 
-async function arm(kind, id, driverId) {
+async function arm(kind, id, driverId, timeoutOverrideMs) {
   disarm(kind, id);
-  const timeoutMs = await settingService.getAcceptTimeoutMs();
+  const timeoutMs = timeoutOverrideMs ?? await settingService.getAcceptTimeoutMs();
   const t = setTimeout(() => {
     timers.delete(key(kind, id));
     const fire = kind === 'task' ? fireTaskTimeout : fireVisitorTimeout;
@@ -38,6 +39,42 @@ async function arm(kind, id, driverId) {
     });
   }, timeoutMs);
   timers.set(key(kind, id), t);
+}
+
+// Re-arms countdowns for assignments that were still awaiting acceptance
+// when the process last stopped. Without this, a deploy or crash silently
+// stranded every pending assignment: no timeout would ever fire, so the
+// valet would never be prompted to reassign and the driver would stay
+// marked busy indefinitely. Each one resumes with whatever remains of its
+// original window (or fires almost immediately if that window has already
+// elapsed while the server was down).
+async function rehydrate() {
+  const timeoutMs = await settingService.getAcceptTimeoutMs();
+  const remainingFor = (assignedAt) => {
+    if (!assignedAt) return 1000;
+    return Math.max(1000, timeoutMs - (Date.now() - new Date(assignedAt).getTime()));
+  };
+
+  const [tasks, visitors] = await Promise.all([
+    prisma.parkingTask.findMany({
+      where: { status: 'assigned', driverId: { not: null }, acceptedAt: null },
+      select: { id: true, driverId: true, assignedAt: true },
+    }),
+    prisma.visitor.findMany({
+      where: { status: 'pending', driverId: { not: null }, acceptedAt: null },
+      select: { id: true, driverId: true, driverAssignedAt: true },
+    }),
+  ]);
+
+  for (const t of tasks) await arm('task', t.id, t.driverId, remainingFor(t.assignedAt));
+  for (const v of visitors) await arm('visitor', v.id, v.driverId, remainingFor(v.driverAssignedAt));
+
+  const count = tasks.length + visitors.length;
+  if (count > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[acceptWatchdog] re-armed ${count} pending assignment(s) after restart`);
+  }
+  return count;
 }
 
 async function fireTaskTimeout(taskId, driverId) {
@@ -108,4 +145,4 @@ async function fireVisitorTimeout(visitorId, driverId) {
   }).catch(() => {});
 }
 
-module.exports = { arm, disarm };
+module.exports = { arm, disarm, rehydrate };

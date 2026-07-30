@@ -19,6 +19,10 @@ router.patch('/:id/park', requireRole('driver', 'admin'), ctrl.park);
 router.patch('/:id/retrieve', requireRole('driver', 'admin'), ctrl.retrieve);
 router.patch('/:id/confirm-delivered', requireRole('valet', 'admin'), ctrl.confirmDelivered);
 router.patch('/:id/cancel', requireRole('valet', 'admin'), ctrl.cancel);
+// Valet aborts a park job already in the driver's hands — "bring it back".
+router.patch('/:id/recall', requireRole('valet', 'admin'), ctrl.recall);
+// Driver confirms they've brought a recalled car back to the counter.
+router.patch('/:id/returned', requireRole('driver', 'admin'), ctrl.markReturned);
 router.patch('/:id/location', requireRole('driver', 'admin'), ctrl.updateLocation);
 
 module.exports = router;

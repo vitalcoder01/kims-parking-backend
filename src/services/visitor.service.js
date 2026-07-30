@@ -3,6 +3,9 @@ const ApiError = require('../utils/ApiError');
 const cache = require('../utils/responseCache');
 const realtime = require('../realtime');
 const watchdog = require('./acceptWatchdog');
+const notificationService = require('./notification.service');
+const assignLocks = require('./assignLocks');
+const runSerializable = require('../utils/runSerializable');
 const { serializeVisitor, serializeSlot } = require('../utils/serialize');
 
 // Public tracking links carry either the publicToken (a non-numeric cuid)
@@ -18,6 +21,18 @@ function publicLookupWhere(idOrToken) {
 
 function generateToken() {
   return String(Math.floor(Math.random() * 900) + 100); // 3-digit, matches app
+}
+
+// Releases a driver ONLY if they're still actually on this job — mirrors
+// task.service.js's helper of the same name. Blanking currentTaskId
+// unconditionally would mark a driver free while they're genuinely out on
+// a newer job they'd since been assigned.
+async function freeDriverIfStillOn(tx, driverId, jobId) {
+  if (!driverId) return false;
+  const driver = await tx.driver.findUnique({ where: { id: driverId } });
+  if (driver && driver.currentTaskId != null && driver.currentTaskId !== jobId) return false;
+  await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
+  return true;
 }
 
 // Same reasoning as task.service.js listTasks — bound the default list to
@@ -96,58 +111,72 @@ async function updateVisitor(id, patch) {
 // Valet: assigns an available driver to collect the key and park this
 // visitor's car. Starts the accept countdown — the driver must confirm on
 // their phone or the valet is prompted to reassign.
-// Same in-process lock as task.service.js's assignDriver, same reason: a
-// double-tap (or two different sessions) assigning this same visitor pickup
-// back-to-back must not both go through as sequential "valid" reassignments.
-const assigningVisitors = new Set();
-
 async function assignDriver(visitorId, driverId) {
-  if (assigningVisitors.has(visitorId)) {
-    throw ApiError.conflict('This pickup is already being assigned to a driver');
-  }
-  assigningVisitors.add(visitorId);
-  try {
-    let previousDriverId = null;
-    const visitor = await prisma.$transaction(async (tx) => {
-      const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
-      if (!existing) throw ApiError.notFound('Visitor not found');
-      assertTransition(existing, ['pending'], 'assign a driver');
+  // Locks the pickup AND the driver, in the same shared registry
+  // task.service.js uses — otherwise a parking task and a visitor pickup
+  // could each claim this same driver at the same moment (separate locks
+  // and separate ids meant neither one saw the other).
+  return assignLocks.withLocks(
+    [assignLocks.visitorKey(visitorId), assignLocks.driverKey(driverId)],
+    'This pickup or driver is already being assigned',
+    async () => {
+      let previousDriverId = null;
+      // Serializable, matching the task-side assign: at Read Committed two
+      // concurrent assigns could both read this driver as available.
+      const visitor = await runSerializable(async (tx) => {
+        const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
+        if (!existing) throw ApiError.notFound('Visitor not found');
+        assertTransition(existing, ['pending'], 'assign a driver');
 
-      const driver = await tx.driver.findUnique({ where: { id: driverId } });
-      if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-      if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
-
-      const updated = await tx.visitor.update({
-        where: { id: visitorId },
-        data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25 },
-        include: visitorInclude,
-      });
-
-      await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
-
-      // Same fix as task.service.js's assignDriver: reassigning away from
-      // whoever had this before their accept/reject ever ran must free them
-      // too, or they're stuck 'busy' forever on a job that's no longer theirs.
-      if (existing.driverId && existing.driverId !== driverId) {
-        const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
-        if (oldDriver?.currentTaskId === visitorId) {
-          await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
-          previousDriverId = existing.driverId;
+        // Same rule as parking tasks: once a driver has accepted, the job is
+        // theirs until it's explicitly cancelled — no silent handovers.
+        if (existing.acceptedAt && existing.driverId && existing.driverId !== driverId) {
+          throw ApiError.conflict('That driver has already accepted this pickup — cancel it first to reassign');
         }
-      }
 
-      return updated;
-    });
-    cache.invalidate('visitors:');
-    cache.invalidate('drivers:');
-    emitVisitor(visitor);
-    emitDriverPatch(driverId, 'busy', visitorId);
-    if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
-    await watchdog.arm('visitor', visitorId, driverId);
-    return visitor;
-  } finally {
-    assigningVisitors.delete(visitorId);
-  }
+        const driver = await tx.driver.findUnique({ where: { id: driverId } });
+        if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
+        if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
+
+        const updated = await tx.visitor.update({
+          where: { id: visitorId },
+          data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25 },
+          include: visitorInclude,
+        });
+
+        await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
+
+        // Same fix as task.service.js's assignDriver: reassigning away from
+        // whoever had this before their accept/reject ever ran must free them
+        // too, or they're stuck 'busy' forever on a job that's no longer theirs.
+        if (existing.driverId && existing.driverId !== driverId) {
+          const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
+          if (oldDriver?.currentTaskId === visitorId) {
+            await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
+            previousDriverId = existing.driverId;
+          }
+        }
+
+        return updated;
+      });
+      cache.invalidate('visitors:');
+      cache.invalidate('drivers:');
+      emitVisitor(visitor);
+      emitDriverPatch(driverId, 'busy', visitorId);
+      if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
+      // Server-side alert, same reasoning as the task-side assign: a valet
+      // whose phone dies right after this call must not leave a live
+      // assignment the driver was never told about.
+      notificationService.push({
+        targetRole: `driver:${driverId}`,
+        title: '🔔 Visitor Car Pickup!',
+        body: `Collect key from valet for ${visitor.name}'s car (${visitor.carNumber ?? 'no plate'}).`,
+        type: 'alarm',
+      }).catch(() => {});
+      await watchdog.arm('visitor', visitorId, driverId);
+      return visitor;
+    },
+  );
 }
 
 // Driver: accepted the pickup — stops the accept countdown.
@@ -184,7 +213,7 @@ async function rejectTask(visitorId, driverId) {
       data: { driverId: null, driverAssignedAt: null, acceptedAt: null, trackingProgress: 0 },
       include: visitorInclude,
     });
-    await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
+    await freeDriverIfStillOn(tx, driverId, visitorId);
     return { updated, driverName };
   });
   cache.invalidate('visitors:');
@@ -226,12 +255,7 @@ async function cancelVisitor(visitorId, reason) {
     assertTransition(visitor, ['pending'], 'cancel');
 
     const freedDriverId = visitor.driverId;
-    if (freedDriverId) {
-      const driver = await tx.driver.findUnique({ where: { id: freedDriverId } });
-      if (driver?.currentTaskId === visitorId) {
-        await tx.driver.update({ where: { id: freedDriverId }, data: { status: 'available', currentTaskId: null } });
-      }
-    }
+    await freeDriverIfStillOn(tx, freedDriverId, visitorId);
 
     const updated = await tx.visitor.update({
       where: { id: visitorId },
@@ -250,7 +274,10 @@ async function cancelVisitor(visitorId, reason) {
 // Driver: car has been parked. Slot may be omitted — the backend then
 // auto-assigns the next free slot (what the app's park call relies on).
 async function markParked(visitorId, slotId) {
-  const { visitor, slot } = await prisma.$transaction(async (tx) => {
+  // Serializable: at Read Committed two concurrent "auto-assign the next
+  // free slot" calls both resolve to the same first free slot and both
+  // write it, silently losing one car's occupancy record.
+  const { visitor, slot } = await runSerializable(async (tx) => {
     const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
     if (!existing) throw ApiError.notFound('Visitor not found');
     assertTransition(existing, ['pending'], 'mark parked');
@@ -270,9 +297,7 @@ async function markParked(visitorId, slotId) {
       data: { status: 'occupied', carNumber: existing.carNumber },
     });
 
-    if (existing.driverId) {
-      await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
-    }
+    await freeDriverIfStillOn(tx, existing.driverId, visitorId);
 
     const updated = await tx.visitor.update({
       where: { id: visitorId },
@@ -321,7 +346,17 @@ async function requestRetrieval(visitorIdOrToken) {
 // the retrieval completes, so the driver's own currentTaskId is what
 // disambiguates "actively out on this retrieval right now".
 async function assignRetrievalDriver(visitorId, driverId) {
-  const visitor = await prisma.$transaction(async (tx) => {
+  // This path had no lock at all — only the pickup-side assign did, so a
+  // double-tap here went straight through.
+  return assignLocks.withLocks(
+    [assignLocks.visitorKey(visitorId), assignLocks.driverKey(driverId)],
+    'This retrieval or driver is already being assigned',
+    () => assignRetrievalDriverLocked(visitorId, driverId),
+  );
+}
+
+async function assignRetrievalDriverLocked(visitorId, driverId) {
+  const visitor = await runSerializable(async (tx) => {
     const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
     if (!existing) throw ApiError.notFound('Visitor not found');
     assertTransition(existing, ['parked'], 'assign a retrieval driver');
@@ -349,6 +384,12 @@ async function assignRetrievalDriver(visitorId, driverId) {
   cache.invalidate('drivers:');
   emitVisitor(visitor);
   emitDriverPatch(driverId, 'busy', visitorId);
+  notificationService.push({
+    targetRole: `driver:${driverId}`,
+    title: '🔔 Visitor Retrieval!',
+    body: `Bring ${visitor.carNumber ?? 'the car'} from slot ${visitor.slotId ?? ''} back for ${visitor.name}.`,
+    type: 'alarm',
+  }).catch(() => {});
   return visitor;
 }
 
@@ -361,17 +402,20 @@ async function markRetrieved(visitorId) {
     assertTransition(existing, ['parked'], 'mark retrieved');
     if (!existing.retrievalRequested) throw ApiError.conflict('Retrieval has not been requested for this car');
 
+    // The slot recorded on the visitor is the authority for which slot this
+    // retrieval empties — requiring the plate to match too meant any drift
+    // in it (an edit, different spacing/case, or no plate captured at all)
+    // silently skipped the release and stranded that slot as permanently
+    // occupied with nothing able to free it again.
     let freedSlot = null;
     if (existing.slotId) {
       const slot = await tx.parkingSlot.findUnique({ where: { id: existing.slotId } });
-      if (slot?.status === 'occupied' && slot.carNumber === existing.carNumber) {
+      if (slot?.status === 'occupied') {
         freedSlot = await tx.parkingSlot.update({ where: { id: existing.slotId }, data: { status: 'free', taskId: null, carNumber: null, doctorId: null } });
       }
     }
 
-    if (existing.driverId) {
-      await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
-    }
+    await freeDriverIfStillOn(tx, existing.driverId, visitorId);
 
     const updated = await tx.visitor.update({
       where: { id: visitorId },

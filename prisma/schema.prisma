@@ -90,6 +90,12 @@ model ParkingTask {
   destinationLng    Float?
   requestedAt       DateTime?
   acceptedAt        DateTime?
+  // Valet aborted a park job after the key was already handed over: the
+  // driver must bring the car BACK to the counter rather than park it.
+  // Set while the task is still key_collected/in_transit; the driver then
+  // marks it returned (-> delivered) and the valet confirms (-> cancelled),
+  // the same two-step handshake a retrieval already uses.
+  recalledAt        DateTime?
   // One doctor/staff member ever has at most one row with isCurrent=true —
   // enforced by a partial unique index (see the manual migration SQL,
   // Prisma's schema DSL can't express a WHERE-qualified unique constraint).
@@ -105,6 +111,10 @@ model ParkingTask {
   doctor            User         @relation("DoctorTasks", fields: [doctorId], references: [id])
   driver            Driver?      @relation("DriverTasks", fields: [driverId], references: [id])
 
+  // A driver is on at most one live job at a time — enforced by a partial
+  // unique index over (driverId) WHERE status IN (assigned, key_collected,
+  // in_transit), written by hand in the migration since Prisma's DSL can't
+  // express a WHERE-qualified unique constraint.
   @@index([doctorId])
   @@index([doctorId, createdAt])
   @@index([driverId])
