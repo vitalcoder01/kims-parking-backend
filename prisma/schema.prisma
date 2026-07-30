@@ -92,6 +92,13 @@ model ParkingTask {
   destinationLng    Float?
   requestedAt       DateTime?
   acceptedAt        DateTime?
+  // When the driver actually set off (marked in-transit). The retrieval
+  // countdown anchors here, NOT to requestedAt: a doctor asking for their
+  // car "in 10 minutes" is stating a deadline, and the trip itself doesn't
+  // begin until someone is dispatched and moving. Anchoring the trip clock
+  // to the request meant it burned down through valet response and driver
+  // travel time, so it routinely read 00:00 before the car had moved.
+  startedAt         DateTime?
   // Valet aborted a park job after the key was already handed over: the
   // driver must bring the car BACK to the counter rather than park it.
   // Set while the task is still key_collected/in_transit; the driver then

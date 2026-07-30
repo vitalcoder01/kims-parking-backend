@@ -506,7 +506,14 @@ async function markInTransit(taskId, driverId) {
 
   const updated = await prisma.parkingTask.update({
     where: { id: taskId },
-    data: { status: 'in_transit', driverStartLat: null, driverStartLng: null },
+    // startedAt only on the first transition — a re-entry into in_transit
+    // shouldn't restart the trip clock the doctor is watching.
+    data: {
+      status: 'in_transit',
+      driverStartLat: null,
+      driverStartLng: null,
+      ...(task.startedAt ? {} : { startedAt: new Date() }),
+    },
     include: taskInclude,
   });
   cache.invalidate('tasks:');
