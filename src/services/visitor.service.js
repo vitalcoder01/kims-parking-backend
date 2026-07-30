@@ -151,8 +151,9 @@ async function assignDriver(visitorId, driverId, valetId) {
 
         // Acting on the job re-stamps the claim and clears any escalation,
         // so the stall clock restarts instead of it still reading unattended.
+        // Ownership follows whoever acts — see task.service.js assignDriver.
         const ownership = {
-          ...(valetId && !existing.valetId ? { valetId } : {}),
+          ...(valetId ? { valetId } : {}),
           valetClaimedAt: new Date(),
           escalatedAt: null,
         };

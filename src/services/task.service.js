@@ -316,8 +316,15 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
         // For a job that already has an owner, acting on it re-stamps the
         // claim and clears any escalation, so the stall clock starts over
         // rather than the job being treated as still-unattended.
+        // Ownership follows whoever is actually doing the work. This used to
+        // only ever stamp valetId on a job that had none, so it never moved:
+        // after a job escalated and a SECOND valet stepped in and staffed it,
+        // the record still named the first valet as owner. The claim guard
+        // above then read "owner === caller" for the original valet and let
+        // them reassign straight over the top of the person who'd just fixed
+        // it — with escalatedAt cleared, so the takeover wasn't even visible.
         const ownership = {
-          ...(valetId && !existing.valetId ? { valetId } : {}),
+          ...(valetId ? { valetId } : {}),
           valetClaimedAt: new Date(),
           escalatedAt: null,
         };
