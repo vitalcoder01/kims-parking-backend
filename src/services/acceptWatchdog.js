@@ -9,6 +9,10 @@ const settingService = require('./setting.service');
 const notificationService = require('./notification.service');
 const realtime = require('../realtime');
 const { serializeTask, serializeVisitor } = require('../utils/serialize');
+// Required lazily inside the handlers: jobAlerts pulls in notification/
+// setting services, and requiring it at module load creates a cycle with
+// the task/visitor services that require this watchdog.
+function jobAlerts() { return require('./jobAlerts'); }
 
 const taskInclude = { doctor: true, driver: { include: { user: true } } };
 const visitorInclude = { driver: { include: { user: true } } };
@@ -104,14 +108,9 @@ async function fireTaskTimeout(taskId, driverId) {
   const serialized = serializeTask(updated);
   realtime.emitAll('task:upsert', serialized);
   realtime.emitAll('driver:patch', { id: driverId, status: 'available', currentTaskId: null });
-  // The prompt event the valet app answers with its reassign flow.
-  realtime.emitToRoles(['valet', 'admin'], 'task:needs-reassign', { task: serialized, driverName });
-  await notificationService.push({
-    targetRole: 'valet',
-    title: '⚠️ Driver did not accept',
-    body: `${driverName} didn't accept ${updated.carNumber} in time. Please assign another driver.`,
-    type: 'alarm',
-  }).catch(() => {});
+  // Owner-targeted rather than broadcast to every valet — jobAlerts decides
+  // who to address, and its sweep escalates if the owner doesn't act.
+  await jobAlerts().alertTaskNeedsDriver(updated, driverName);
 }
 
 async function fireVisitorTimeout(visitorId, driverId) {
@@ -136,13 +135,7 @@ async function fireVisitorTimeout(visitorId, driverId) {
   const serialized = serializeVisitor(updated);
   realtime.emitAll('visitor:upsert', serialized);
   realtime.emitAll('driver:patch', { id: driverId, status: 'available', currentTaskId: null });
-  realtime.emitToRoles(['valet', 'admin'], 'visitor:needs-reassign', { visitor: serialized, driverName });
-  await notificationService.push({
-    targetRole: 'valet',
-    title: '⚠️ Driver did not accept',
-    body: `${driverName} didn't accept ${updated.name}'s pickup in time. Please assign another driver.`,
-    type: 'alarm',
-  }).catch(() => {});
+  await jobAlerts().alertVisitorNeedsDriver(updated, driverName);
 }
 
 module.exports = { arm, disarm, rehydrate };

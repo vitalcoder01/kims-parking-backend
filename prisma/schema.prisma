@@ -28,6 +28,8 @@ model User {
   notifications       Notification[]
   parkedSlots         ParkingSlot[]  @relation("SlotDoctor")
   tasksAsDoctor       ParkingTask[]  @relation("DoctorTasks")
+  tasksAsValet        ParkingTask[]  @relation("ValetTasks")
+  visitorsAsValet     Visitor[]      @relation("ValetVisitors")
   deviceTokens        DeviceToken[]
   arrivalNotices      ArrivalNotice[]
 
@@ -107,6 +109,20 @@ model ParkingTask {
   id                Int          @id @default(autoincrement())
   doctorId          Int
   driverId          Int?
+  // The valet who owns this job — whoever took the key (park), or whoever
+  // first assigned a driver (retrieve, since the doctor creates those). Only
+  // this valet is alarmed when the job needs attention, instead of waking
+  // every valet on shift. Nullable: a retrieval has no owner until a valet
+  // acts on it, and ownership can be handed over (see valetClaimedAt).
+  valetId           Int?
+  valet             User?        @relation("ValetTasks", fields: [valetId], references: [id])
+  // When the current owner took it — lets an unanswered job escalate to the
+  // rest of the valets (and then admins) instead of sitting silently with
+  // someone whose phone is dead.
+  valetClaimedAt    DateTime?
+  // Set once this job has been escalated past its owner, so the escalation
+  // only ever fires once per stall rather than on every sweep.
+  escalatedAt       DateTime?
   occupyingSlot     ParkingSlot? @relation("CurrentSlotTask")
   doctor            User         @relation("DoctorTasks", fields: [doctorId], references: [id])
   driver            Driver?      @relation("DriverTasks", fields: [driverId], references: [id])
@@ -145,6 +161,12 @@ model Visitor {
   cancelledAt        DateTime?
   driverAssignedAt   DateTime?
   vehicleType        VehicleType   @default(car)
+  // Same ownership model as ParkingTask — the valet who registered this
+  // visitor owns the job and is the one alarmed if it stalls.
+  valetId            Int?
+  valet              User?         @relation("ValetVisitors", fields: [valetId], references: [id])
+  valetClaimedAt     DateTime?
+  escalatedAt        DateTime?
   driver             Driver?       @relation("VisitorDriver", fields: [driverId], references: [id])
 
   @@index([status])

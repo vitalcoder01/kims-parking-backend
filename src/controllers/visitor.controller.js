@@ -19,7 +19,7 @@ const create = asyncHandler(async (req, res) => {
   if (!name || !mobile) {
     throw ApiError.badRequest('name and mobile are required');
   }
-  const visitor = await visitorService.createVisitor({ name, carNumber, mobile, vehicleType });
+  const visitor = await visitorService.createVisitor({ name, carNumber, mobile, vehicleType, valetId: req.user.id });
   res.status(201).json({ visitor: serializeVisitor(visitor) });
 });
 
@@ -61,7 +61,7 @@ const update = asyncHandler(async (req, res) => {
 const assignDriver = asyncHandler(async (req, res) => {
   const { driverId } = req.body;
   if (!driverId) throw ApiError.badRequest('driverId is required');
-  const visitor = await visitorService.assignDriver(parseId(req.params.id), parseId(driverId));
+  const visitor = await visitorService.assignDriver(parseId(req.params.id), parseId(driverId), req.user.id);
   res.json({ visitor: serializeVisitor(visitor) });
 });
 

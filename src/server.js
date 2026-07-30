@@ -21,6 +21,11 @@ require('./services/acceptWatchdog').rehydrate().catch((err) => {
   console.warn('[kims-parking-backend] watchdog rehydrate failed:', err.message);
 });
 
+// Escalation ladder for jobs whose owning valet hasn't acted — see
+// jobAlerts.js. A DB sweep rather than per-job timers, so it survives a
+// restart on its own.
+require('./services/jobAlerts').startEscalationSweep();
+
 async function shutdown(signal) {
   // eslint-disable-next-line no-console
   console.log(`\n[kims-parking-backend] ${signal} received, shutting down...`);

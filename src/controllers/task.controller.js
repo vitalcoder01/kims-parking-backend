@@ -32,7 +32,10 @@ const create = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('Retrieval must be requested by the doctor/staff who owns the car (POST /tasks/request-retrieval)');
   }
 
-  const { task, created } = await taskService.createTask({ type, doctorId: parseId(doctorId), carNumber, slotId });
+  // The valet making this call owns the resulting job.
+  const { task, created } = await taskService.createTask({
+    type, doctorId: parseId(doctorId), carNumber, slotId, valetId: req.user.id,
+  });
   // A repeat call that returned the existing task (double-tap) isn't a new
   // vehicle handled — only count real creations.
   if (created) await attendanceService.incrementVehiclesHandled(req.user.id);
@@ -55,7 +58,7 @@ const assignDriver = asyncHandler(async (req, res) => {
   if (!driverId) throw ApiError.badRequest('driverId is required');
 
   const valetLocation = typeof lat === 'number' && typeof lng === 'number' ? { lat, lng } : null;
-  const task = await taskService.assignDriver(parseId(req.params.id), parseId(driverId), valetLocation);
+  const task = await taskService.assignDriver(parseId(req.params.id), parseId(driverId), valetLocation, req.user.id);
   res.json({ task: serializeTask(task) });
 });
 

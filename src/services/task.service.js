@@ -6,6 +6,7 @@ const watchdog = require('./acceptWatchdog');
 const arrivalNoticeService = require('./arrivalNotice.service');
 const notificationService = require('./notification.service');
 const assignLocks = require('./assignLocks');
+const jobAlerts = require('./jobAlerts');
 const runSerializable = require('../utils/runSerializable');
 const { serializeTask, serializeSlot } = require('../utils/serialize');
 
@@ -26,6 +27,7 @@ const CACHE_TTL_MS = 2500;
 const taskInclude = {
   doctor: true,
   driver: { include: { user: true } },
+  valet: true,
 };
 
 // A completed task is immutable, and every other transition only makes sense
@@ -123,7 +125,7 @@ async function getTask(id) {
 
 // Valet: "Key Received" — creates a PARK task, attendance is marked by the
 // caller (controller) since it is a distinct concern from task creation.
-async function createTask({ type, doctorId, carNumber, slotId }) {
+async function createTask({ type, doctorId, carNumber, slotId, valetId }) {
   const doctor = await prisma.user.findUnique({ where: { id: doctorId } });
   if (!doctor) throw ApiError.badRequest('doctorId does not reference a valid user');
 
@@ -173,6 +175,10 @@ async function createTask({ type, doctorId, carNumber, slotId }) {
         destinationLat: null,
         destinationLng: null,
         isCurrent: true,
+        // The valet who physically took the key owns this job — they're the
+        // one alarmed if it stalls, rather than every valet on shift.
+        valetId: valetId ?? null,
+        valetClaimedAt: valetId ? new Date() : null,
       },
       include: taskInclude,
     });
@@ -251,7 +257,7 @@ async function requestRetrieval({ doctorId, eta }) {
 
 // Valet: assigns an available driver to a requested (or already-assigned,
 // e.g. reassigning) task.
-async function assignDriver(taskId, driverId, valetLocation) {
+async function assignDriver(taskId, driverId, valetLocation, valetId) {
   // Locks BOTH sides of the assignment: the job (so two valets can't both
   // assign this same job) and the driver (so two valets can't both grab
   // this same driver for two different jobs — a per-task lock alone let
@@ -290,10 +296,21 @@ async function assignDriver(taskId, driverId, valetLocation) {
           ? { destinationLat: valetLocation.lat, destinationLng: valetLocation.lng }
           : {};
 
+        // A retrieval is raised by the doctor, so it has no owning valet
+        // until one acts on it — whoever assigns the first driver takes it.
+        // For a job that already has an owner, acting on it re-stamps the
+        // claim and clears any escalation, so the stall clock starts over
+        // rather than the job being treated as still-unattended.
+        const ownership = {
+          ...(valetId && !existing.valetId ? { valetId } : {}),
+          valetClaimedAt: new Date(),
+          escalatedAt: null,
+        };
+
         const updated = await tx.parkingTask.update({
           where: { id: taskId },
           // A (re)assignment restarts the accept handshake from scratch.
-          data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest },
+          data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest, ...ownership },
           include: taskInclude,
         });
 
@@ -413,11 +430,7 @@ async function rejectTask(taskId, driverId) {
   cache.invalidate('drivers:');
   emitTask(result.updated);
   emitDriverPatch(driverId, 'available', null);
-  realtime.emitToRoles(['valet', 'admin'], 'task:needs-reassign', {
-    task: serializeTask(result.updated),
-    driverName: result.driverName,
-    rejected: true,
-  });
+  await jobAlerts.alertTaskNeedsDriver(result.updated, result.driverName, { rejected: true });
   return result.updated;
 }
 

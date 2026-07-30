@@ -5,6 +5,7 @@ const realtime = require('../realtime');
 const watchdog = require('./acceptWatchdog');
 const notificationService = require('./notification.service');
 const assignLocks = require('./assignLocks');
+const jobAlerts = require('./jobAlerts');
 const runSerializable = require('../utils/runSerializable');
 const { serializeVisitor, serializeSlot } = require('../utils/serialize');
 
@@ -79,7 +80,7 @@ async function getVisitor(id) {
   return visitor;
 }
 
-async function createVisitor({ name, carNumber, mobile, vehicleType }) {
+async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) {
   const visitor = await prisma.visitor.create({
     data: {
       name: name.trim(),
@@ -90,6 +91,9 @@ async function createVisitor({ name, carNumber, mobile, vehicleType }) {
       vehicleType: vehicleType === 'bike' ? 'bike' : 'car',
       token: generateToken(),
       status: 'pending',
+      // The valet who registered this visitor owns the job.
+      valetId: valetId ?? null,
+      valetClaimedAt: valetId ? new Date() : null,
     },
     include: visitorInclude,
   });
@@ -111,7 +115,7 @@ async function updateVisitor(id, patch) {
 // Valet: assigns an available driver to collect the key and park this
 // visitor's car. Starts the accept countdown — the driver must confirm on
 // their phone or the valet is prompted to reassign.
-async function assignDriver(visitorId, driverId) {
+async function assignDriver(visitorId, driverId, valetId) {
   // Locks the pickup AND the driver, in the same shared registry
   // task.service.js uses — otherwise a parking task and a visitor pickup
   // could each claim this same driver at the same moment (separate locks
@@ -138,9 +142,17 @@ async function assignDriver(visitorId, driverId) {
         if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
         if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
 
+        // Acting on the job re-stamps the claim and clears any escalation,
+        // so the stall clock restarts instead of it still reading unattended.
+        const ownership = {
+          ...(valetId && !existing.valetId ? { valetId } : {}),
+          valetClaimedAt: new Date(),
+          escalatedAt: null,
+        };
+
         const updated = await tx.visitor.update({
           where: { id: visitorId },
-          data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25 },
+          data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25, ...ownership },
           include: visitorInclude,
         });
 
@@ -220,11 +232,7 @@ async function rejectTask(visitorId, driverId) {
   cache.invalidate('drivers:');
   emitVisitor(result.updated);
   emitDriverPatch(driverId, 'available', null);
-  realtime.emitToRoles(['valet', 'admin'], 'visitor:needs-reassign', {
-    visitor: serializeVisitor(result.updated),
-    driverName: result.driverName,
-    rejected: true,
-  });
+  await jobAlerts.alertVisitorNeedsDriver(result.updated, result.driverName, { rejected: true });
   return result.updated;
 }
 
