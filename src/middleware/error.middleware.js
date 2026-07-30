@@ -52,7 +52,7 @@ function errorHandler(err, req, res, next) {
   }
 
   res.status(statusCode).json({
-    error: { message, details: err.details },
+    error: { message, details: err.details, code: err.code },
   });
 }
 

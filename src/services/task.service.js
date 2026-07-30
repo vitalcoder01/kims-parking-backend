@@ -36,7 +36,10 @@ const taskInclude = {
 // completedAt/slotId in place, corrupting the record.
 function assertTransition(task, allowed, action) {
   if (!allowed.includes(task.status)) {
-    throw ApiError.conflict(`Cannot ${action} — task is currently "${task.status}"`);
+    // Tagged JOB_GONE: by the time a transition is refused the job has moved
+    // past the point the caller was acting on, so retrying the same screen
+    // can't succeed.
+    throw ApiError.conflict(`Cannot ${action} — task is currently "${task.status}"`, 'JOB_GONE');
   }
 }
 
@@ -280,7 +283,7 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
         // hand it to someone else the valet has to cancel it first, which is
         // a deliberate, visible action rather than an invisible override.
         if (existing.acceptedAt && existing.driverId && existing.driverId !== driverId) {
-          throw ApiError.conflict('That driver has already accepted this job — cancel it first to reassign');
+          throw ApiError.conflict('That driver has already accepted this job — cancel it first to reassign', 'JOB_GONE');
         }
 
         // One job, one valet. Without this, two valets who both received the
@@ -295,12 +298,12 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
         // who logs off mid-job can't freeze a real car indefinitely.
         if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt) {
           const owner = await tx.user.findUnique({ where: { id: existing.valetId }, select: { name: true } });
-          throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`);
+          throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
         }
 
         const driver = await tx.driver.findUnique({ where: { id: driverId } });
         if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-        if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
+        if (driver.status !== 'available') throw ApiError.conflict('Driver is not available', 'DRIVER_BUSY');
 
         // A retrieve task's real destination is wherever the valet assigning
         // this driver happens to be standing right now — the actual physical

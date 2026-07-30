@@ -61,7 +61,7 @@ function emitSlot(slot) {
 
 function assertTransition(visitor, allowed, action) {
   if (!allowed.includes(visitor.status)) {
-    throw ApiError.conflict(`Cannot ${action} — visitor's car is currently "${visitor.status}"`);
+    throw ApiError.conflict(`Cannot ${action} — visitor's car is currently "${visitor.status}"`, 'JOB_GONE');
   }
 }
 
@@ -135,19 +135,19 @@ async function assignDriver(visitorId, driverId, valetId) {
         // Same rule as parking tasks: once a driver has accepted, the job is
         // theirs until it's explicitly cancelled — no silent handovers.
         if (existing.acceptedAt && existing.driverId && existing.driverId !== driverId) {
-          throw ApiError.conflict('That driver has already accepted this pickup — cancel it first to reassign');
+          throw ApiError.conflict('That driver has already accepted this pickup — cancel it first to reassign', 'JOB_GONE');
         }
 
         // One pickup, one valet — see task.service.js assignDriver for why
         // this lifts once the job has escalated rather than being permanent.
         if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt) {
           const owner = await tx.user.findUnique({ where: { id: existing.valetId }, select: { name: true } });
-          throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this pickup`);
+          throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this pickup`, 'JOB_GONE');
         }
 
         const driver = await tx.driver.findUnique({ where: { id: driverId } });
         if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-        if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
+        if (driver.status !== 'available') throw ApiError.conflict('Driver is not available', 'DRIVER_BUSY');
 
         // Acting on the job re-stamps the claim and clears any escalation,
         // so the stall clock restarts instead of it still reading unattended.
@@ -407,7 +407,7 @@ async function assignRetrievalDriverLocked(visitorId, driverId) {
 
     const driver = await tx.driver.findUnique({ where: { id: driverId } });
     if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-    if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
+    if (driver.status !== 'available') throw ApiError.conflict('Driver is not available', 'DRIVER_BUSY');
 
     await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
 
