@@ -96,45 +96,58 @@ async function updateVisitor(id, patch) {
 // Valet: assigns an available driver to collect the key and park this
 // visitor's car. Starts the accept countdown — the driver must confirm on
 // their phone or the valet is prompted to reassign.
+// Same in-process lock as task.service.js's assignDriver, same reason: a
+// double-tap (or two different sessions) assigning this same visitor pickup
+// back-to-back must not both go through as sequential "valid" reassignments.
+const assigningVisitors = new Set();
+
 async function assignDriver(visitorId, driverId) {
-  let previousDriverId = null;
-  const visitor = await prisma.$transaction(async (tx) => {
-    const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
-    if (!existing) throw ApiError.notFound('Visitor not found');
-    assertTransition(existing, ['pending'], 'assign a driver');
+  if (assigningVisitors.has(visitorId)) {
+    throw ApiError.conflict('This pickup is already being assigned to a driver');
+  }
+  assigningVisitors.add(visitorId);
+  try {
+    let previousDriverId = null;
+    const visitor = await prisma.$transaction(async (tx) => {
+      const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
+      if (!existing) throw ApiError.notFound('Visitor not found');
+      assertTransition(existing, ['pending'], 'assign a driver');
 
-    const driver = await tx.driver.findUnique({ where: { id: driverId } });
-    if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-    if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
+      const driver = await tx.driver.findUnique({ where: { id: driverId } });
+      if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
+      if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
 
-    const updated = await tx.visitor.update({
-      where: { id: visitorId },
-      data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25 },
-      include: visitorInclude,
-    });
+      const updated = await tx.visitor.update({
+        where: { id: visitorId },
+        data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25 },
+        include: visitorInclude,
+      });
 
-    await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
+      await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
 
-    // Same fix as task.service.js's assignDriver: reassigning away from
-    // whoever had this before their accept/reject ever ran must free them
-    // too, or they're stuck 'busy' forever on a job that's no longer theirs.
-    if (existing.driverId && existing.driverId !== driverId) {
-      const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
-      if (oldDriver?.currentTaskId === visitorId) {
-        await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
-        previousDriverId = existing.driverId;
+      // Same fix as task.service.js's assignDriver: reassigning away from
+      // whoever had this before their accept/reject ever ran must free them
+      // too, or they're stuck 'busy' forever on a job that's no longer theirs.
+      if (existing.driverId && existing.driverId !== driverId) {
+        const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
+        if (oldDriver?.currentTaskId === visitorId) {
+          await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
+          previousDriverId = existing.driverId;
+        }
       }
-    }
 
-    return updated;
-  });
-  cache.invalidate('visitors:');
-  cache.invalidate('drivers:');
-  emitVisitor(visitor);
-  emitDriverPatch(driverId, 'busy', visitorId);
-  if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
-  await watchdog.arm('visitor', visitorId, driverId);
-  return visitor;
+      return updated;
+    });
+    cache.invalidate('visitors:');
+    cache.invalidate('drivers:');
+    emitVisitor(visitor);
+    emitDriverPatch(driverId, 'busy', visitorId);
+    if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
+    await watchdog.arm('visitor', visitorId, driverId);
+    return visitor;
+  } finally {
+    assigningVisitors.delete(visitorId);
+  }
 }
 
 // Driver: accepted the pickup — stops the accept countdown.

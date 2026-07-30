@@ -133,6 +133,19 @@ async function createTask({ type, doctorId, carNumber, slotId }) {
       if (isOpen && isFresh) return { task: existing, created: false };
     }
 
+    // The duplicate-tap guard above only covers the first couple minutes
+    // after a still-open handoff — it does nothing once the car has
+    // actually been parked. Re-scanning that same doctor's code afterwards
+    // (a mis-scan, or someone not realizing the car's already parked) would
+    // otherwise start a second park job and send a driver to park a car
+    // that's already sitting in its slot, without ever freeing that slot —
+    // the real signal that a "start parking" request doesn't make sense
+    // right now is an occupied slot already on file for this doctor.
+    const occupiedSlot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
+    if (occupiedSlot) {
+      throw ApiError.conflict(`This car is already parked at slot ${occupiedSlot.id} — request a retrieval instead of parking again`);
+    }
+
     await retireCurrentTask(tx, doctorId);
 
     const made = await tx.parkingTask.create({
@@ -220,66 +233,84 @@ async function requestRetrieval({ doctorId, eta }) {
 
 // Valet: assigns an available driver to a requested (or already-assigned,
 // e.g. reassigning) task.
+// Backend-side lock mirroring the frontend's "disable while assigning" —
+// but closing the gap the frontend guard alone can't: two requests from
+// different devices/sessions, or any client that isn't this app's UI at
+// all. Node is single-threaded and there's no `await` between the check
+// and the add, so two calls that arrive back-to-back for the SAME task
+// can never both pass this check — the second is rejected outright instead
+// of racing the first's transaction (which, if it already committed, would
+// otherwise look like a perfectly valid reassignment).
+const assigningTasks = new Set();
+
 async function assignDriver(taskId, driverId, valetLocation) {
-  let previousDriverId = null;
-  const task = await runSerializable(async (tx) => {
-    const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
-    if (!existing) throw ApiError.notFound('Task not found');
-    assertTransition(existing, ['requested', 'assigned'], 'assign a driver');
+  if (assigningTasks.has(taskId)) {
+    throw ApiError.conflict('This job is already being assigned to a driver');
+  }
+  assigningTasks.add(taskId);
+  try {
+    let previousDriverId = null;
+    const task = await runSerializable(async (tx) => {
+      const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
+      if (!existing) throw ApiError.notFound('Task not found');
+      assertTransition(existing, ['requested', 'assigned'], 'assign a driver');
 
-    const driver = await tx.driver.findUnique({ where: { id: driverId } });
-    if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-    if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
+      const driver = await tx.driver.findUnique({ where: { id: driverId } });
+      if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
+      if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
 
-    // A retrieve task's real destination is wherever the valet assigning
-    // this driver happens to be standing right now — the actual physical
-    // handover point. Naturally supports multiple valets (each one's own
-    // location, not one shared fixed point) since it's captured fresh on
-    // every assignment rather than configured once somewhere central.
-    const dest = existing.type === 'retrieve' && valetLocation
-      ? { destinationLat: valetLocation.lat, destinationLng: valetLocation.lng }
-      : {};
+      // A retrieve task's real destination is wherever the valet assigning
+      // this driver happens to be standing right now — the actual physical
+      // handover point. Naturally supports multiple valets (each one's own
+      // location, not one shared fixed point) since it's captured fresh on
+      // every assignment rather than configured once somewhere central.
+      const dest = existing.type === 'retrieve' && valetLocation
+        ? { destinationLat: valetLocation.lat, destinationLng: valetLocation.lng }
+        : {};
 
-    const updated = await tx.parkingTask.update({
-      where: { id: taskId },
-      // A (re)assignment restarts the accept handshake from scratch.
-      data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest },
-      include: taskInclude,
-    });
+      const updated = await tx.parkingTask.update({
+        where: { id: taskId },
+        // A (re)assignment restarts the accept handshake from scratch.
+        data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest },
+        include: taskInclude,
+      });
 
-    await tx.driver.update({
-      where: { id: driverId },
-      data: { status: 'busy', currentTaskId: taskId },
-    });
+      await tx.driver.update({
+        where: { id: driverId },
+        data: { status: 'busy', currentTaskId: taskId },
+      });
 
-    // Reassigning away from whoever had it before (accept-timeout and
-    // reject already free the old driver themselves before this ever runs,
-    // but a valet picking a different driver mid-assignment — before the
-    // first one ever accepted or rejected — otherwise leaves that driver
-    // stuck 'busy' on a task that's no longer theirs, forever, since
-    // nothing else ever revisits it. Only clear them if that driver isn't
-    // busy on some OTHER job too (currentTaskId still points at this task).
-    if (existing.driverId && existing.driverId !== driverId) {
-      const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
-      if (oldDriver?.currentTaskId === taskId) {
-        await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
-        previousDriverId = existing.driverId;
+      // Reassigning away from whoever had it before (accept-timeout and
+      // reject already free the old driver themselves before this ever runs,
+      // but a valet picking a different driver mid-assignment — before the
+      // first one ever accepted or rejected — otherwise leaves that driver
+      // stuck 'busy' on a task that's no longer theirs, forever, since
+      // nothing else ever revisits it. Only clear them if that driver isn't
+      // busy on some OTHER job too (currentTaskId still points at this task).
+      if (existing.driverId && existing.driverId !== driverId) {
+        const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
+        if (oldDriver?.currentTaskId === taskId) {
+          await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
+          previousDriverId = existing.driverId;
+        }
       }
-    }
 
-    return updated;
-  });
-  cache.invalidate('tasks:');
-  cache.invalidate('drivers:');
-  emitTask(task);
-  emitDriverPatch(driverId, 'busy', taskId);
-  if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
-  // Countdown for the driver to accept — on expiry the valet is prompted
-  // to reassign (see acceptWatchdog.js). Any countdown still running for
-  // the driver just bumped off this task is superseded by this same call
-  // (arm() disarms whatever timer already existed for this task id).
-  await watchdog.arm('task', taskId, driverId);
-  return task;
+      return updated;
+    });
+    cache.invalidate('tasks:');
+    cache.invalidate('drivers:');
+    emitTask(task);
+    emitDriverPatch(driverId, 'busy', taskId);
+    if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
+    // Countdown for the driver to accept — on expiry the valet is prompted
+    // to reassign (see acceptWatchdog.js). Any countdown still running for
+    // the driver just bumped off this task is superseded by this same call
+    // (arm() disarms whatever timer already existed for this task id).
+    await watchdog.arm('task', taskId, driverId);
+    return task;
+  } finally {
+    assigningTasks.delete(taskId);
+  }
 }
 
 // Driver: explicit "I've got it" on the assignment alert. Stops the accept
