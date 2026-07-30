@@ -24,7 +24,7 @@ const get = asyncHandler(async (req, res) => {
 // marks that person present too — handing your key to the valet is real
 // proof you're on-site, so there's no separate manual check-in step needed.
 const create = asyncHandler(async (req, res) => {
-  const { type, doctorId, carNumber, slotId, destinationLat, destinationLng } = req.body;
+  const { type, doctorId, carNumber, slotId } = req.body;
   if (!type || !doctorId || !carNumber) {
     throw ApiError.badRequest('type, doctorId and carNumber are required');
   }
@@ -32,7 +32,7 @@ const create = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('Retrieval must be requested by the doctor/staff who owns the car (POST /tasks/request-retrieval)');
   }
 
-  const { task, created } = await taskService.createTask({ type, doctorId: parseId(doctorId), carNumber, slotId, destinationLat, destinationLng });
+  const { task, created } = await taskService.createTask({ type, doctorId: parseId(doctorId), carNumber, slotId });
   // A repeat call that returned the existing task (double-tap) isn't a new
   // vehicle handled — only count real creations.
   if (created) await attendanceService.incrementVehiclesHandled(req.user.id);
@@ -45,16 +45,17 @@ const create = asyncHandler(async (req, res) => {
 // GPS destination is wherever they are standing right now (their own
 // phone) — that's who the driver is actually bringing it back to.
 const requestRetrieval = asyncHandler(async (req, res) => {
-  const { eta, destinationLat, destinationLng } = req.body;
-  const task = await taskService.requestRetrieval({ doctorId: req.user.id, eta, destinationLat, destinationLng });
+  const { eta } = req.body;
+  const task = await taskService.requestRetrieval({ doctorId: req.user.id, eta });
   res.status(201).json({ task: serializeTask(task) });
 });
 
 const assignDriver = asyncHandler(async (req, res) => {
-  const { driverId } = req.body;
+  const { driverId, lat, lng } = req.body;
   if (!driverId) throw ApiError.badRequest('driverId is required');
 
-  const task = await taskService.assignDriver(parseId(req.params.id), parseId(driverId));
+  const valetLocation = typeof lat === 'number' && typeof lng === 'number' ? { lat, lng } : null;
+  const task = await taskService.assignDriver(parseId(req.params.id), parseId(driverId), valetLocation);
   res.json({ task: serializeTask(task) });
 });
 

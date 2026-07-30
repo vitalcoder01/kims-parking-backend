@@ -4,7 +4,6 @@ const cache = require('../utils/responseCache');
 const realtime = require('../realtime');
 const watchdog = require('./acceptWatchdog');
 const arrivalNoticeService = require('./arrivalNotice.service');
-const settingService = require('./setting.service');
 const { serializeTask, serializeSlot } = require('../utils/serialize');
 
 // Realtime deltas: every mutation below emits the changed entity itself so
@@ -110,7 +109,7 @@ async function getTask(id) {
 
 // Valet: "Key Received" — creates a PARK task, attendance is marked by the
 // caller (controller) since it is a distinct concern from task creation.
-async function createTask({ type, doctorId, carNumber, slotId, destinationLat, destinationLng }) {
+async function createTask({ type, doctorId, carNumber, slotId }) {
   const doctor = await prisma.user.findUnique({ where: { id: doctorId } });
   if (!doctor) throw ApiError.badRequest('doctorId does not reference a valid user');
 
@@ -122,18 +121,10 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
   // long ago is a forgotten/stuck one, not a duplicate of *this* click, so
   // it gets superseded (see retireCurrentTask) instead of returned.
   const DUPLICATE_TAP_MS = 2 * 60 * 1000;
-  // A park task has no per-request destination the way a retrieval does
-  // (that one's derived from the doctor's live location) — the real
-  // destination is just the parking lot itself, a fixed point the admin
-  // sets once (Settings screen), so fall back to it here whenever the
-  // caller didn't already supply one.
-  let destLat = destinationLat ?? null;
-  let destLng = destinationLng ?? null;
-  if (destLat == null || destLng == null) {
-    const lotDest = await settingService.getParkingLotDestination();
-    destLat = destLat ?? lotDest?.lat ?? null;
-    destLng = destLng ?? lotDest?.lng ?? null;
-  }
+  // A park task genuinely has no destination — the driver just has the key
+  // and drives to whichever free slot they pick, there's no fixed point to
+  // route to in advance. Live tracking for this leg shows the driver's real
+  // position, not a route to somewhere.
   const { task, created } = await runSerializable(async tx => {
     const existing = await tx.parkingTask.findFirst({ where: { doctorId, isCurrent: true }, include: taskInclude });
     if (existing) {
@@ -152,8 +143,8 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
         slotId: slotId ?? null,
         status: 'assigned',
         assignedAt: new Date(),
-        destinationLat: destLat,
-        destinationLng: destLng,
+        destinationLat: null,
+        destinationLng: null,
         isCurrent: true,
       },
       include: taskInclude,
@@ -185,21 +176,12 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
 // Doctor/staff: request retrieval of their own currently-parked car. This is
 // the ONLY way a retrieve task can come into existence — the valet cannot
 // invent one — so a driver never gets sent to pull a car nobody asked for.
-async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng }) {
-  // The car is actually handed back at a fixed gate/entrance (see the
-  // "CAR READY AT ENTRANCE — please collect at the gate" copy already
-  // shown to doctors), not wherever the doctor's phone happens to be
-  // standing at the moment they tap the button — that live-GPS capture was
-  // exactly as fragile as an emulator's default location was for parking,
-  // and could silently produce no destination at all on a GPS failure. Only
-  // fall back to it if a caller explicitly passed coordinates of their own.
-  let destLat = destinationLat ?? null;
-  let destLng = destinationLng ?? null;
-  if (destLat == null || destLng == null) {
-    const gate = await settingService.getValetGateDestination();
-    destLat = destLat ?? gate?.lat ?? null;
-    destLng = destLng ?? gate?.lng ?? null;
-  }
+async function requestRetrieval({ doctorId, eta }) {
+  // No destination yet at request time — the real pickup point is wherever
+  // the valet who assigns a driver to this happens to be standing (see
+  // assignDriver below), since that's the actual physical handover spot,
+  // and it naturally supports multiple valets each at their own location
+  // instead of a single fixed point.
   const task = await runSerializable(async (tx) => {
     const slot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
     if (!slot) throw ApiError.badRequest('No parked car found for your account');
@@ -224,8 +206,8 @@ async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng 
         status: 'requested',
         requestedAt: new Date(),
         eta: eta ?? null,
-        destinationLat: destLat,
-        destinationLng: destLng,
+        destinationLat: null,
+        destinationLng: null,
         isCurrent: true,
       },
       include: taskInclude,
@@ -238,7 +220,7 @@ async function requestRetrieval({ doctorId, eta, destinationLat, destinationLng 
 
 // Valet: assigns an available driver to a requested (or already-assigned,
 // e.g. reassigning) task.
-async function assignDriver(taskId, driverId) {
+async function assignDriver(taskId, driverId, valetLocation) {
   let previousDriverId = null;
   const task = await runSerializable(async (tx) => {
     const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
@@ -249,10 +231,19 @@ async function assignDriver(taskId, driverId) {
     if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
     if (driver.status !== 'available') throw ApiError.conflict('Driver is not available');
 
+    // A retrieve task's real destination is wherever the valet assigning
+    // this driver happens to be standing right now — the actual physical
+    // handover point. Naturally supports multiple valets (each one's own
+    // location, not one shared fixed point) since it's captured fresh on
+    // every assignment rather than configured once somewhere central.
+    const dest = existing.type === 'retrieve' && valetLocation
+      ? { destinationLat: valetLocation.lat, destinationLng: valetLocation.lng }
+      : {};
+
     const updated = await tx.parkingTask.update({
       where: { id: taskId },
       // A (re)assignment restarts the accept handshake from scratch.
-      data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null },
+      data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest },
       include: taskInclude,
     });
 
