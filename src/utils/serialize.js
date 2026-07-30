@@ -103,6 +103,17 @@ function serializeVisitorPublic(v) {
   };
 }
 
+function serializeArrivalNotice(n) {
+  if (!n) return null;
+  return {
+    id: n.id,
+    doctorId: n.doctorId,
+    doctorName: n.doctor?.name,
+    eta: n.eta,
+    createdAt: n.createdAt,
+  };
+}
+
 function serializeNotification(n) {
   if (!n) return null;
   return {
@@ -125,4 +136,5 @@ module.exports = {
   serializeVisitor,
   serializeVisitorPublic,
   serializeNotification,
+  serializeArrivalNotice,
 };

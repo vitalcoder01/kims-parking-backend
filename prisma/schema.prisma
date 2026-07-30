@@ -29,6 +29,7 @@ model User {
   parkedSlots         ParkingSlot[]  @relation("SlotDoctor")
   tasksAsDoctor       ParkingTask[]  @relation("DoctorTasks")
   deviceTokens        DeviceToken[]
+  arrivalNotices      ArrivalNotice[]
 
   @@index([role])
   @@map("users")
@@ -181,6 +182,25 @@ model Setting {
   updatedAt DateTime @updatedAt
 
   @@map("settings")
+}
+
+// A doctor/staff member's "I'm on my way" notice, given before they've
+// physically handed over a car — there's no ParkingTask to anchor this to
+// yet (that's only created once the valet takes the key), so it's its own
+// small, short-lived record. Cleared (fulfilledAt set) automatically the
+// moment a real park ParkingTask is created for the same doctor, or
+// manually by the valet if it was a no-show/mistake.
+model ArrivalNotice {
+  id          Int       @id @default(autoincrement())
+  doctorId    Int
+  doctor      User      @relation(fields: [doctorId], references: [id])
+  eta         Int
+  createdAt   DateTime  @default(now())
+  fulfilledAt DateTime?
+
+  @@index([doctorId])
+  @@index([fulfilledAt])
+  @@map("arrival_notices")
 }
 
 model DeviceToken {

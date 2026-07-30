@@ -3,6 +3,7 @@ const ApiError = require('../utils/ApiError');
 const cache = require('../utils/responseCache');
 const realtime = require('../realtime');
 const watchdog = require('./acceptWatchdog');
+const arrivalNoticeService = require('./arrivalNotice.service');
 const { serializeTask, serializeSlot } = require('../utils/serialize');
 
 // Realtime deltas: every mutation below emits the changed entity itself so
@@ -156,6 +157,13 @@ async function createTask({ type, doctorId, carNumber, slotId, destinationLat, d
   // code would otherwise permanently misattach a plate to the wrong person).
   if (created && !doctor.carNumber?.trim()) {
     await prisma.user.update({ where: { id: doctorId }, data: { carNumber: task.carNumber } }).catch(() => {});
+  }
+
+  // This doctor's key just actually changed hands — any "I'm on my way"
+  // notice they announced earlier is done, whether or not they ever sent
+  // one (a no-op if there wasn't one).
+  if (created) {
+    arrivalNoticeService.fulfillForDoctor(doctorId).catch(() => {});
   }
 
   return { task, created };

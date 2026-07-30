@@ -22,6 +22,7 @@ router.use('/drivers', require('./driver.routes'));
 router.use('/slots', require('./slot.routes'));
 router.use('/visitors', require('./visitor.routes'));
 router.use('/notifications', require('./notification.routes'));
+router.use('/arrivals', require('./arrivalNotice.routes'));
 router.use('/attendance', require('./attendance.routes'));
 router.use('/admin', require('./admin.routes'));
 router.use('/track', require('./track.routes'));
