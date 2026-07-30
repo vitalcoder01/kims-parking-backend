@@ -306,6 +306,14 @@ async function markKeyCollected(taskId) {
   if (!task) throw ApiError.notFound('Task not found');
   if (task.type !== 'park') throw ApiError.conflict('Only park tasks have a key handoff step');
   assertTransition(task, ['assigned'], 'mark key collected');
+  // Without this, a valet tapping "Key Handed to Driver" races the driver's
+  // own accept/reject handshake: a reject that lands right after this call
+  // would find the task already past 'assigned' and be rejected itself,
+  // stranding the driver on a job they just tried to decline — or, the
+  // other ordering, this call could go through with driverId already
+  // cleared by a reject that landed first, leaving a 'key_collected' task
+  // with no driver on it and no UI able to act on it again.
+  if (!task.acceptedAt) throw ApiError.conflict('Driver has not accepted this assignment yet');
 
   const updated = await prisma.parkingTask.update({
     where: { id: taskId },
