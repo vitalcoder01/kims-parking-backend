@@ -973,12 +973,24 @@ async function markReturned(taskId, driverId) {
   emitTask(task);
   if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
 
-  notificationService.push({
-    targetRole: 'valet',
-    title: '🔔 Recalled Car Returned — Confirm',
-    body: `${task.carNumber} is back at the counter. Confirm once you have the key.`,
-    type: 'alarm',
-  }).catch(() => {});
+  // The valet who recalled this car is the one waiting for it at the counter,
+  // so ring them alone. Unowned jobs still go to the floor — a car sitting
+  // there unconfirmed is worse than an extra alarm.
+  const returnOwner = task.valetId ?? task.arrivalOwnerValetId;
+  notificationService.push(returnOwner
+    ? {
+        targetRole: `valet:${returnOwner}`,
+        targetUserId: returnOwner,
+        title: '🔔 Recalled Car Returned — Confirm',
+        body: `${task.carNumber} is back at the counter. Confirm once you have the key.`,
+        type: 'alarm',
+      }
+    : {
+        targetRole: 'valet',
+        title: '🔔 Recalled Car Returned — Confirm',
+        body: `${task.carNumber} is back at the counter. Confirm once you have the key.`,
+        type: 'alarm',
+      }).catch(() => {});
   return task;
 }
 
