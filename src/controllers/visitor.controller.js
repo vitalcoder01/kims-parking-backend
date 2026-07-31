@@ -1,8 +1,9 @@
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const visitorService = require('../services/visitor.service');
+const taskService = require('../services/task.service');
 const notificationService = require('../services/notification.service');
-const { serializeVisitor, serializeVisitorPublic } = require('../utils/serialize');
+const { serializeTask, serializeVisitor, serializeVisitorPublic } = require('../utils/serialize');
 const parseId = require('../utils/parseId');
 
 const list = asyncHandler(async (req, res) => {
@@ -13,13 +14,49 @@ const list = asyncHandler(async (req, res) => {
 // Creates the visitor record + token. The mobile app is responsible for
 // opening the WhatsApp deep link with this token — that's a client-side
 // action (Linking.openURL), not something this API performs.
+// Valet desk: find a live visitor session by token, mobile, plate or name.
+const search = asyncHandler(async (req, res) => {
+  const visitors = await visitorService.searchVisitors(req.query.q);
+  res.json({ visitors: visitors.map(serializeVisitor) });
+});
+
+// Valet desk: the visitor is standing here and wants their car. Routed
+// through taskService.requestRetrieval — the SAME function the doctor's app
+// calls — so ownership, scheduling, notifications, timeout recovery and
+// driver assignment are the existing ones, not a second implementation.
+const requestVisitorRetrieval = asyncHandler(async (req, res) => {
+  const id = parseId(req.params.id);
+  const raw = req.body?.plannedDepartureMinutes;
+  const task = await taskService.requestRetrieval({
+    visitorId: id,
+    plannedDepartureMinutes: raw == null ? 0 : Number(raw),
+  });
+  // Mirrored onto the Visitor row so the tracking page, which reads Visitor,
+  // reflects the request without needing to know a task exists.
+  const visitor = await visitorService.markRetrievalRequested(id);
+  res.status(201).json({ visitor: serializeVisitor(visitor), task: serializeTask(task) });
+});
+
+// Typeahead for the check-in form's vehicle field.
+const suggestPlates = asyncHandler(async (req, res) => {
+  const plates = await visitorService.suggestPlates(req.query.q);
+  res.json({ plates });
+});
+
 const create = asyncHandler(async (req, res) => {
   const { name, carNumber, mobile, vehicleType } = req.body;
-  // carNumber is optional — the plate may not be available at intake.
-  if (!name || !mobile) {
-    throw ApiError.badRequest('name and mobile are required');
+  // Name and carNumber are both optional — a visitor may decline to give a
+  // name, and the plate may not be readable at intake. The mobile number is
+  // the one thing that must be right: it is how the token and the tracking
+  // link reach them, and a wrong one means a visitor with no way to get
+  // their car back.
+  const digits = String(mobile ?? '').replace(/\D/g, '');
+  if (digits.length !== 10) {
+    throw ApiError.badRequest('A valid 10-digit mobile number is required');
   }
-  const visitor = await visitorService.createVisitor({ name, carNumber, mobile, vehicleType, valetId: req.user.id });
+  const visitor = await visitorService.createVisitor({
+    name, carNumber, mobile: digits, vehicleType, valetId: req.user.id,
+  });
   res.status(201).json({ visitor: serializeVisitor(visitor) });
 });
 
@@ -87,7 +124,7 @@ const park = asyncHandler(async (req, res) => {
 
 // Valet: assign (or reassign) a driver to a retrieval — either one they're
 // raising themselves or one the visitor already flagged from the tracking
-// page (selfRequestRetrieval below).
+// page ( below).
 const assignRetrievalDriver = asyncHandler(async (req, res) => {
   const { driverId } = req.body;
   if (!driverId) throw ApiError.badRequest('driverId is required');
@@ -115,18 +152,5 @@ const track = asyncHandler(async (req, res) => {
   res.json({ visitor: serializeVisitorPublic(visitor) });
 });
 
-// Public (no auth) — the tracking page's "Request My Car" button. Only
-// flags the request; a valet still has to assign a driver (assignRetrievalDriver
-// above), same division of labor as the doctor/staff retrieval flow.
-const selfRequestRetrieval = asyncHandler(async (req, res) => {
-  const visitor = await visitorService.requestRetrieval(req.params.id);
-  await notificationService.push({
-    targetRole: 'valet',
-    title: '🚗 Visitor Ready to Leave',
-    body: `${visitor.name} requested their car (${visitor.carNumber}) back from slot ${visitor.slotId ?? ''}.`,
-    type: 'info',
-  }).catch(() => {});
-  res.json({ visitor: serializeVisitorPublic(visitor) });
-});
 
-module.exports = { list, create, update, assignDriver, accept, reject, pickup, cancel, park, assignRetrievalDriver, retrieve, confirmDelivered, track, selfRequestRetrieval };
+module.exports = { search, requestVisitorRetrieval, suggestPlates, list, create, update, assignDriver, accept, reject, pickup, cancel, park, assignRetrievalDriver, retrieve, confirmDelivered, track };

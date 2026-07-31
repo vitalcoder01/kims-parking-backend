@@ -13,8 +13,15 @@ function serializeTask(task) {
   return {
     id: task.id,
     type: task.type,
-    doctorId: task.doctorId,
-    doctorName: task.doctor?.name,
+    doctorId: task.doctorId ?? undefined,
+    // One label for "whose car is this", whether the owner is a staff member
+    // or a visitor. The valet's queue and inbox render this field and should
+    // not have to know which kind of session they are looking at.
+    doctorName: task.doctor?.name ?? task.visitor?.name ?? undefined,
+    visitorId: task.visitorId ?? undefined,
+    // Lets the UI say "Visitor" where it matters (e.g. no department to show)
+    // without inferring it from a missing doctorId.
+    isVisitor: task.visitorId != null ? true : undefined,
     // Who this person actually is, for the valet about to dispatch someone on
     // their behalf. Same two fields the arrival notice already exposes, so
     // this widens no privacy surface — deliberately NOT the phone number,
@@ -131,6 +138,10 @@ function serializeVisitorPublic(v) {
   if (!v) return null;
   return {
     name: v.name,
+    // The parking token belongs on the tracking page — it is what the visitor
+    // shows at the desk to collect their car, and the page is now the primary
+    // place they read it when WhatsApp is switched off.
+    token: v.token,
     carNumber: v.carNumber || undefined,
     vehicleType: v.vehicleType ?? 'car',
     slotId: v.slotId ?? undefined,

@@ -134,7 +134,13 @@ model ParkingTask {
   // real one" ambiguity anywhere in the app.
   isCurrent         Boolean      @default(true)
   id                Int          @id @default(autoincrement())
-  doctorId          Int
+  // Nullable since visitor/patient sessions run through this same table: a
+  // visitor is not a User, so they have no doctorId. Exactly one of doctorId
+  // and visitorId is set, enforced by a CHECK constraint in the migration
+  // rather than left to application code to remember.
+  doctorId          Int?
+  visitorId         Int?
+  visitor           Visitor?     @relation("VisitorTasks", fields: [visitorId], references: [id])
   driverId          Int?
   // The valet who owns this job — whoever took the key (park), or whoever
   // first assigned a driver (retrieve, since the doctor creates those). Only
@@ -177,7 +183,7 @@ model ParkingTask {
   recoveryBroadcastAt DateTime?
 
   occupyingSlot     ParkingSlot? @relation("CurrentSlotTask")
-  doctor            User         @relation("DoctorTasks", fields: [doctorId], references: [id])
+  doctor            User?        @relation("DoctorTasks", fields: [doctorId], references: [id])
   driver            Driver?      @relation("DriverTasks", fields: [driverId], references: [id])
 
   // A driver is on at most one live job at a time — enforced by a partial
@@ -185,6 +191,7 @@ model ParkingTask {
   // in_transit), written by hand in the migration since Prisma's DSL can't
   // express a WHERE-qualified unique constraint.
   @@index([retrievalReadyAt])
+  @@index([visitorId])
   @@index([doctorId])
   @@index([doctorId, createdAt])
   @@index([driverId])
@@ -195,6 +202,10 @@ model ParkingTask {
 }
 
 model Visitor {
+  // Parking sessions for this visitor. Visitors use the SAME ParkingTask
+  // machinery as staff — scheduling, ownership, recovery, driver assignment —
+  // rather than a parallel implementation.
+  tasks              ParkingTask[] @relation("VisitorTasks")
   name               String
   carNumber          String?
   mobile             String

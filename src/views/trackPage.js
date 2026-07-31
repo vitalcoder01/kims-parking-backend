@@ -48,6 +48,11 @@ function renderTrackPage(id) {
   }
   .actionBtn:disabled { opacity: 0.5; cursor: default; }
   .actionNote { margin-top: 10px; text-align: center; font-size: 12px; color: #c0392b; min-height: 14px; }
+  /* The page is informational: the only "action" is a line telling them to
+     come to the desk, so it reads as guidance rather than a dead button. */
+  .deskNote { margin-top: 16px; padding: 14px; border-radius: 12px; background: #F1F0EC;
+              border: 1px solid #E4E2DC; text-align: center; font-size: 13px;
+              font-weight: 600; color: #15161A; line-height: 1.5; }
   .confirmBanner {
     margin-top: 18px; text-align: center; font-size: 13px; font-weight: 700; color: #0f6e5a;
     background: #0f6e5a14; border-radius: 12px; padding: 12px;
@@ -73,7 +78,6 @@ function renderTrackPage(id) {
       { key: 'retrieved', label: 'Ready' },
     ];
 
-    let requesting = false;
     let lastUpdated = null;
 
     function stepIndex(v) {
@@ -85,6 +89,17 @@ function renderTrackPage(id) {
 
     function escapeHtml(str) {
       return String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // Pinned to the hospital's timezone: this server may well run in UTC, and
+    // "checked in at 8:18 pm" for a 1:48 am arrival is worse than no time.
+    function checkInLabel(iso) {
+      try {
+        return new Date(iso).toLocaleString('en-IN', {
+          hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short',
+          timeZone: 'Asia/Kolkata',
+        });
+      } catch (e) { return ''; }
     }
 
     function timeAgo() {
@@ -110,20 +125,21 @@ function renderTrackPage(id) {
       else if (v.status === 'retrieved') statusMsg = 'Your car has been retrieved. Thank you for visiting KIMS Hospital!';
       else statusMsg = '';
 
+      // Information only. A visitor cannot request their own car — they come
+      // to the valet desk, and the valet raises the retrieval. So this page
+      // never offers an action, only tells them where things stand.
       let actionHtml = '';
-      if (v.status === 'parked' && !v.retrievalRequested) {
-        actionHtml =
-          '<button class="actionBtn" id="requestBtn"' + (requesting ? ' disabled' : '') + '>' +
-          (requesting ? 'Requesting…' : '🚗 Request My Car') +
-          '</button>' +
-          '<div class="actionNote" id="actionNote"></div>';
-      } else if (v.status === 'parked' && v.retrievalRequested) {
-        actionHtml = '<div class="confirmBanner">✓ Your car has been requested — the valet team has been notified.</div>';
+      if (v.status === 'parked' && v.retrievalRequested) {
+        actionHtml = '<div class="confirmBanner">\u2713 The valet team is bringing your car.</div>';
+      } else if (v.status === 'parked') {
+        actionHtml = '<div class="deskNote">Ready to leave? Please visit the valet desk and show this token.</div>';
       }
 
       document.getElementById('content').innerHTML =
         '<div class="row"><span class="label">Name</span><span class="value">' + escapeHtml(v.name) + '</span></div>' +
         '<div class="row"><span class="label">Car Number</span><span class="value">' + escapeHtml(v.carNumber) + '</span></div>' +
+        '<div class="row"><span class="label">Token</span><span class="value">' + escapeHtml(String(v.token || '—')) + '</span></div>' +
+        (v.createdAt ? '<div class="row"><span class="label">Checked In</span><span class="value">' + escapeHtml(checkInLabel(v.createdAt)) + '</span></div>' : '') +
         (v.slotId ? '<div class="row"><span class="label">Slot</span><span class="value">' + escapeHtml(v.slotId) + '</span></div>' : '') +
         (v.driverName ? '<div class="row"><span class="label">Driver</span><span class="value">' + escapeHtml(v.driverName) + '</span></div>' : '') +
         '<div class="steps"><div class="fill" style="width:' + fillPct + '%"></div>' + dots + '</div>' +
@@ -131,32 +147,10 @@ function renderTrackPage(id) {
         actionHtml +
         '<div class="footer" id="footer">Auto-refreshing · Updated ' + timeAgo() + ' · KIMS Smart Parking</div>';
 
-      const btn = document.getElementById('requestBtn');
-      if (btn) btn.addEventListener('click', requestMyCar);
+
     }
 
-    async function requestMyCar() {
-      if (requesting) return;
-      requesting = true;
-      const btn = document.getElementById('requestBtn');
-      if (btn) { btn.disabled = true; btn.textContent = 'Requesting…'; }
-      try {
-        const res = await fetch('/api/track/' + encodeURIComponent(ID) + '/request-retrieval', { method: 'PATCH' });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body?.error?.message || 'Could not request your car right now.');
-        }
-        const { visitor } = await res.json();
-        requesting = false;
-        lastUpdated = Date.now();
-        render(visitor);
-      } catch (e) {
-        requesting = false;
-        const note = document.getElementById('actionNote');
-        if (note) note.textContent = e.message || 'Something went wrong — please try again.';
-        if (btn) { btn.disabled = false; btn.textContent = '🚗 Request My Car'; }
-      }
-    }
+
 
     async function poll() {
       try {

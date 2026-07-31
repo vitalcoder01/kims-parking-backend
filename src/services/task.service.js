@@ -46,6 +46,7 @@ const CACHE_TTL_MS = 2500;
 
 const taskInclude = {
   doctor: true,
+  visitor: true,
   driver: { include: { user: true } },
   valet: true,
   arrivalOwnerValet: true,
@@ -169,8 +170,10 @@ async function freeDriverIfStillOn(tx, driverId, jobId) {
 // old "assigned, no driver" job nobody ever finished) is being superseded by
 // a genuinely new session, so it's force-cancelled rather than left
 // dangling forever in a status that claims to still be in progress.
-async function retireCurrentTask(tx, doctorId) {
-  const existing = await tx.parkingTask.findFirst({ where: { doctorId, isCurrent: true } });
+// `owner` is { doctorId } or { visitorId } — the same "at most one current
+// session" rule applies to both, and each has its own partial unique index.
+async function retireCurrentTask(tx, owner) {
+  const existing = await tx.parkingTask.findFirst({ where: { ...owner, isCurrent: true } });
   if (!existing) return;
   const terminal = existing.status === 'completed' || existing.status === 'cancelled';
   await tx.parkingTask.update({
@@ -226,7 +229,7 @@ async function createTask({ type, doctorId, carNumber, slotId, valetId }) {
       throw ApiError.conflict(`This car is already parked at slot ${occupiedSlot.id} — request a retrieval instead of parking again`);
     }
 
-    await retireCurrentTask(tx, doctorId);
+    await retireCurrentTask(tx, { doctorId });
 
     const made = await tx.parkingTask.create({
       data: {
@@ -299,9 +302,20 @@ const MAX_PLANNED_DEPARTURE_MINUTES = 24 * 60;
 // Extracted so the scheduler sweep and this path raise the identical alert —
 // two copies of the same message drifting apart is how a doctor ends up
 // described one way at request time and another way ten minutes later.
+// Whose car this is, whichever kind of session it belongs to. A visitor's
+// retrieval reads "Ramesh Kumar is leaving", not "A doctor is leaving" — the
+// valet is walking out to a real person and the message has to name them.
+function ownerLabel(task, fallback = 'Someone') {
+  // Trim-then-|| rather than ??: a visitor may check in with NO name at all,
+  // and '' is a value that ?? happily passes through, which would render
+  // "  is leaving and needs TS09 AB 1234".
+  const name = task.doctor?.name ?? task.visitor?.name;
+  return String(name ?? '').trim() || fallback;
+}
+
 function notifyRetrievalOwner(task) {
   const owner = task.arrivalOwnerValetId;
-  const who = task.doctor?.name ?? 'A doctor';
+  const who = ownerLabel(task, 'A guest');
   const body = `${who} is leaving and needs ${task.carNumber}. Please assign a driver.`;
   // `valet:<id>` addresses one person; the bare role name would broadcast to
   // everyone and defeat the entire point of ownership. With no owner (a car
@@ -313,7 +327,17 @@ function notifyRetrievalOwner(task) {
     : { targetRole: 'valet', title: '🚗 Car requested', body, type: 'alarm' });
 }
 
-async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
+/**
+ * Departure request. Raised by the doctor/staff member who owns the car, or by
+ * a visitor from their tracking page — one function, because from here on the
+ * two are the same job: same scheduling, same lead time, same owner valet,
+ * same timeout recovery, same driver assignment, same notifications.
+ *
+ * Exactly one of doctorId / visitorId is given. The only thing that differs is
+ * where the parked car and its owning valet are read from, which is settled in
+ * the first few lines and then never referred to again.
+ */
+async function requestRetrieval({ doctorId, visitorId, plannedDepartureMinutes }) {
   if (plannedDepartureMinutes != null
       && (!Number.isInteger(plannedDepartureMinutes)
         || plannedDepartureMinutes < 0
@@ -337,18 +361,38 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
   const readyNow = readyAt.getTime() <= now;
 
   const task = await runSerializable(async (tx) => {
-    const slot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
-    if (!slot) throw ApiError.badRequest('No parked car found for your account');
+    // Where the parked car is, and who owns the session. Two lookups, one per
+    // kind of owner; everything after this point is identical.
+    let slot;
+    let owner = null;          // { arrivalOwnerValetId, arrivalAcceptedAt }
+    let carNumber;
 
-    // Whoever owned this doctor's parking session owns the departure too, so
-    // the doctor deals with the same valet throughout. Looked up from the
-    // session being retired rather than carried on the doctor, because
-    // ownership belongs to the session.
-    const parkTask = await tx.parkingTask.findFirst({
-      where: { doctorId, type: 'park', arrivalOwnerValetId: { not: null } },
-      orderBy: { createdAt: 'desc' },
-      select: { arrivalOwnerValetId: true, arrivalAcceptedAt: true },
-    });
+    if (visitorId != null) {
+      const visitor = await tx.visitor.findUnique({ where: { id: visitorId } });
+      if (!visitor) throw ApiError.notFound('Visitor not found');
+      if (visitor.status !== 'parked') throw ApiError.badRequest('Your vehicle is not parked yet');
+      slot = visitor.slotId ? await tx.parkingSlot.findUnique({ where: { id: visitor.slotId } }) : null;
+      if (!slot) throw ApiError.badRequest('No parked car found for this token');
+      // The valet who checked the visitor in IS the session owner — the same
+      // role the arrival owner plays for a doctor.
+      owner = { arrivalOwnerValetId: visitor.valetId ?? null, arrivalAcceptedAt: visitor.createdAt };
+      carNumber = visitor.carNumber ?? slot.carNumber ?? '';
+    } else {
+      slot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
+      if (!slot) throw ApiError.badRequest('No parked car found for your account');
+
+      // Whoever owned this doctor's parking session owns the departure too, so
+      // the doctor deals with the same valet throughout. Looked up from the
+      // session being retired rather than carried on the doctor, because
+      // ownership belongs to the session.
+      const parkTask = await tx.parkingTask.findFirst({
+        where: { doctorId, type: 'park', arrivalOwnerValetId: { not: null } },
+        orderBy: { createdAt: 'desc' },
+        select: { arrivalOwnerValetId: true, arrivalAcceptedAt: true },
+      });
+      owner = parkTask ?? null;
+      carNumber = slot.carNumber ?? '';
+    }
 
     // Only a still-live retrieval blocks a new one. 'cancelled' has to be
     // excluded alongside 'completed': it's equally terminal, and treating it
@@ -359,17 +403,18 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
     });
     if (existing) throw ApiError.conflict('Retrieval has already been requested for this car');
 
+    await retireCurrentTask(tx, visitorId != null ? { visitorId } : { doctorId });
+
     // The just-completed park row is this doctor's current row — retiring
     // it here (rather than leaving two isCurrent rows around) is what keeps
     // "one row per doctor" true across a park -> retrieve cycle, not just
     // within a single task type.
-    await retireCurrentTask(tx, doctorId);
-
     return tx.parkingTask.create({
       data: {
         type: 'retrieve',
-        doctorId,
-        carNumber: slot.carNumber ?? '',
+        doctorId: doctorId ?? null,
+        visitorId: visitorId ?? null,
+        carNumber,
         slotId: slot.id,
         status: 'requested',
         requestedAt: new Date(),
@@ -379,10 +424,10 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
         destinationLat: null,
         destinationLng: null,
         isCurrent: true,
-        arrivalOwnerValetId: parkTask?.arrivalOwnerValetId ?? null,
-        arrivalAcceptedAt: parkTask?.arrivalAcceptedAt ?? null,
-        valetId: parkTask?.arrivalOwnerValetId ?? null,
-        valetClaimedAt: parkTask?.arrivalOwnerValetId ? new Date() : null,
+        arrivalOwnerValetId: owner?.arrivalOwnerValetId ?? null,
+        arrivalAcceptedAt: owner?.arrivalAcceptedAt ?? null,
+        valetId: owner?.arrivalOwnerValetId ?? null,
+        valetClaimedAt: owner?.arrivalOwnerValetId ? new Date() : null,
         // The owner's response clock starts when they are NOTIFIED, not when
         // the doctor submitted. A departure booked for 3pm must not burn its
         // 60-second window at 9am and hand itself to recovery six hours
@@ -600,8 +645,8 @@ function notifyDriverAssigned(task) {
     targetRole: `driver:${task.driverId}`,
     title: isRetrieve ? '🔔 Retrieval Task!' : '🔔 Task Assigned!',
     body: isRetrieve
-      ? `Retrieve ${task.carNumber} from slot ${task.slotId} for ${task.doctor?.name ?? 'staff'}.`
-      : `Collect key from valet for ${task.doctor?.name ?? 'staff'}'s car (${task.carNumber}).`,
+      ? `Retrieve ${task.carNumber} from slot ${task.slotId} for ${ownerLabel(task, 'a guest')}.`
+      : `Collect key from valet for ${ownerLabel(task, 'a guest')}'s car (${task.carNumber}).`,
     type: 'alarm',
   });
 }
@@ -1046,7 +1091,7 @@ async function cancelTask(taskId, byDoctorId) {
   // Whoever was working this needs telling, or a valet walks out to a car
   // nobody is coming for and a driver drives to a slot for no reason.
   if (byDoctorId !== undefined) {
-    const who = updated.doctor?.name ?? 'A doctor';
+    const who = ownerLabel(updated, 'A guest');
     const owner = updated.retrievalOwnerValetId ?? updated.arrivalOwnerValetId ?? updated.valetId;
     notificationService.push(owner
       ? {
@@ -1165,6 +1210,7 @@ async function markReturned(taskId, driverId) {
 }
 
 module.exports = {
+  ownerLabel,
   isVisibleToValet,
   isRetrievalScheduled,
   notifyRetrievalOwner,

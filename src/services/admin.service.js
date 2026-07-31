@@ -11,7 +11,7 @@ async function dashboard() {
     prisma.user.count({ where: { role: { in: ['valet', 'staff'] } } }),
     prisma.parkingTask.findMany({
       where: { status: 'completed' },
-      include: { doctor: true, driver: { include: { user: true } } },
+      include: { doctor: true, visitor: true, driver: { include: { user: true } } },
       orderBy: { completedAt: 'desc' },
       take: 10,
     }),
@@ -36,7 +36,7 @@ async function dashboard() {
       type: t.type,
       carNumber: t.carNumber,
       slotId: t.slotId,
-      doctorName: t.doctor?.name,
+      doctorName: t.doctor?.name ?? t.visitor?.name,
       driverName: t.driver?.user?.name,
       completedAt: t.completedAt,
     })),

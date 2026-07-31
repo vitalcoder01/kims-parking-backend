@@ -152,7 +152,7 @@ async function promoteScheduledRetrievals() {
       // exactly once, and it is also what starts the owner's response clock.
       ownerNotifiedAt: null,
     },
-    include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+    include: { doctor: true, visitor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
     take: 50,
   });
 
@@ -168,7 +168,7 @@ async function promoteScheduledRetrievals() {
 
     const fresh = await prisma.parkingTask.findUnique({
       where: { id: task.id },
-      include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+      include: { doctor: true, visitor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
     });
     if (!fresh) continue;
 
@@ -200,7 +200,7 @@ async function releaseUnansweredRetrievals() {
       // booked for later cannot be "unanswered" before anyone was asked.
       ownerNotifiedAt: { not: null, lt: cutoff },
     },
-    include: { doctor: true, arrivalOwnerValet: true },
+    include: { doctor: true, visitor: true, arrivalOwnerValet: true },
     take: 50,
   });
 
@@ -219,7 +219,7 @@ async function releaseUnansweredRetrievals() {
 
     const fresh = await prisma.parkingTask.findUnique({
       where: { id: task.id },
-      include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+      include: { doctor: true, visitor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
     });
 
     // The record still goes out — recoveryBroadcastAt lifts the ownership
@@ -227,7 +227,7 @@ async function releaseUnansweredRetrievals() {
     // needs to reflect the new state.
     realtime.emitToRoles(['valet', 'admin'], 'task:upsert', serializeTask(fresh));
 
-    const who = task.doctor?.name ?? 'A doctor';
+    const who = taskService().ownerLabel(task, 'A guest');
     if (solo) {
       // There is no "original owner unavailable" to report to anyone: the
       // only valet IS the owner, and telling them someone is unavailable —
@@ -301,7 +301,7 @@ async function claimRetrieval(taskId, valetId) {
 
   const task = await prisma.parkingTask.findUnique({
     where: { id: taskId },
-    include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+    include: { doctor: true, visitor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
   });
   if (!task) throw ApiError.notFound('Retrieval request not found');
 
@@ -321,7 +321,7 @@ async function claimRetrieval(taskId, valetId) {
   const withSource = await prisma.parkingTask.update({
     where: { id: taskId },
     data: { retrievalOwnershipSource: source },
-    include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+    include: { doctor: true, visitor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
   });
 
   const payload = serializeTask(withSource);
@@ -361,7 +361,7 @@ async function escalateStalledJobs() {
           retrievalOwnerValetId: null,
         },
       },
-      include: { doctor: true, driver: { include: { user: true } }, valet: true },
+      include: { doctor: true, visitor: true, driver: { include: { user: true } }, valet: true },
       take: 50,
     }),
     prisma.visitor.findMany({

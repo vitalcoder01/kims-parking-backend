@@ -7,6 +7,7 @@ const notificationService = require('./notification.service');
 const assignLocks = require('./assignLocks');
 const jobAlerts = require('./jobAlerts');
 const runSerializable = require('../utils/runSerializable');
+const whatsapp = require('./whatsapp.service');
 const { serializeVisitor, serializeSlot } = require('../utils/serialize');
 
 // Public tracking links carry either the publicToken (a non-numeric cuid)
@@ -74,6 +75,124 @@ async function listVisitors() {
   }));
 }
 
+// Plate suggestions for the check-in form. Sourced from plates the system has
+// already seen — past visitor check-ins and staff vehicles on file — so
+// typing "TS09" surfaces the real cars that start that way instead of asking
+// the valet to read a whole number off a windscreen.
+//
+// Matching is done on a normalised copy (spaces and dashes stripped) because
+// the same plate gets entered as "TS09AB1234", "TS09 AB 1234" and
+// "TS09-AB-1234" depending on who typed it, and a prefix match on the raw
+// text would miss two of the three.
+function normalisePlate(v) {
+  return String(v ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+// Resolve a public tracking token (or raw id) to the visitor behind it. The
+// tracking page and the WhatsApp link both carry the publicToken, never the
+// numeric id, so this is the entry point for every unauthenticated action.
+// Valet-desk lookup: a visitor walks up with a token on their phone, or reads
+// out a number, or points at their car. All three land here.
+//
+// Matched against a normalised copy of the plate for the same reason the
+// autocomplete does — the same car is entered as "TS09AB1234", "TS09 AB 1234"
+// and "TS09-AB-1234" depending on who typed it. Token and mobile are matched
+// as substrings so a partial read still finds them.
+async function searchVisitors(query, limit = 12) {
+  const raw = String(query ?? '').trim();
+  if (raw.length < 2) return [];
+  const digits = raw.replace(/\D/g, '');
+  const plate = normalisePlate(raw);
+  const lower = raw.toLowerCase();
+
+  // Filtering happens in memory over live sessions only, not in the WHERE
+  // clause. A database `contains` compares raw text, so "ap39cz" would never
+  // match the stored "AP39 CZ 4567" — and normalising in SQL is not something
+  // Prisma can express. The candidate set is "cars currently in the car park",
+  // which is inherently small and already loaded wholesale elsewhere.
+  const rows = await prisma.visitor.findMany({
+    where: { status: { notIn: ['retrieved', 'cancelled'] } },
+    include: visitorInclude,
+    orderBy: { createdAt: 'desc' },
+    take: 500,
+  });
+
+  const scored = [];
+  for (const v of rows) {
+    const token = String(v.token ?? '');
+    const mobile = String(v.mobile ?? '');
+    const carN = normalisePlate(v.carNumber);
+    const name = String(v.name ?? '').toLowerCase();
+
+    // Ranked so the desk sees the strongest match first: an exact token is
+    // someone holding their phone up, and should never sit below a loose
+    // name match.
+    let rank = null;
+    if (digits && token === digits) rank = 0;
+    else if (plate.length >= 3 && carN === plate) rank = 1;
+    else if (digits.length >= 4 && mobile.includes(digits)) rank = 2;
+    else if (plate.length >= 2 && carN.includes(plate)) rank = 3;
+    else if (digits && token.includes(digits)) rank = 4;
+    else if (name && name.includes(lower)) rank = 5;
+    if (rank !== null) scored.push({ rank, v });
+  }
+
+  scored.sort((a, b) => a.rank - b.rank);
+  return scored.slice(0, limit).map(x => x.v);
+}
+
+async function getByPublicToken(idOrToken) {
+  const visitor = await prisma.visitor.findFirst({ where: publicLookupWhere(idOrToken) });
+  if (!visitor) throw ApiError.notFound('Visitor not found');
+  return visitor;
+}
+
+// The retrieval itself now lives on a ParkingTask (same machinery as staff).
+// This only mirrors the fact onto the Visitor row, because the tracking page
+// reads Visitor and shouldn't have to know a task exists.
+async function markRetrievalRequested(id) {
+  const updated = await prisma.visitor.update({
+    where: { id },
+    data: { retrievalRequested: true },
+    include: visitorInclude,
+  });
+  cache.invalidate('visitors:');
+  emitVisitor(updated);
+  return updated;
+}
+
+async function suggestPlates(query, limit = 6) {
+  const q = normalisePlate(query);
+  if (q.length < 2) return [];   // one character matches most of the car park
+
+  const [visitors, users] = await Promise.all([
+    prisma.visitor.findMany({
+      where: { carNumber: { not: null } },
+      select: { carNumber: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: 400,
+    }),
+    prisma.user.findMany({
+      where: { carNumber: { not: null } },
+      select: { carNumber: true },
+      take: 400,
+    }),
+  ]);
+
+  // Deduped on the normalised form, keeping the first (most recent) spelling
+  // of each plate so the suggestion looks the way a human wrote it.
+  const seen = new Map();
+  for (const row of [...visitors, ...users]) {
+    const raw = String(row.carNumber ?? '').trim();
+    if (!raw) continue;
+    const key = normalisePlate(raw);
+    if (!key.startsWith(q) || seen.has(key)) continue;
+    seen.set(key, raw.toUpperCase());
+    if (seen.size >= limit) break;
+  }
+  return [...seen.values()];
+}
+
 async function getVisitor(id) {
   const visitor = await prisma.visitor.findUnique({ where: { id }, include: visitorInclude });
   if (!visitor) throw ApiError.notFound('Visitor not found');
@@ -83,10 +202,14 @@ async function getVisitor(id) {
 async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) {
   const visitor = await prisma.visitor.create({
     data: {
-      name: name.trim(),
+      // Name is optional: a visitor who won't give one still needs a token,
+      // and refusing the check-in over it helps nobody. Stored as '' rather
+      // than null so every reader sees a string.
+      name: (name ?? '').trim(),
       // Plate is optional at intake — the app allows registering a visitor
-      // before the car reaches the counter.
-      carNumber: carNumber ? carNumber.trim().toUpperCase() : '',
+      // before the car reaches the counter. Normalised so the same car typed
+      // three different ways matches itself later.
+      carNumber: carNumber ? String(carNumber).trim().toUpperCase().replace(/\s+/g, ' ') : '',
       mobile: mobile.trim(),
       vehicleType: vehicleType === 'bike' ? 'bike' : 'car',
       token: generateToken(),
@@ -99,6 +222,19 @@ async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) 
   });
   cache.invalidate('visitors:');
   emitVisitor(visitor);
+
+  // Fire-and-forget, and deliberately AFTER the record exists: the visitor is
+  // already parked either way, so a WhatsApp failure must never fail the
+  // check-in that triggered it. No-ops silently until the Meta app is
+  // configured.
+  whatsapp.sendCheckIn({
+    mobile: visitor.mobile,
+    name: visitor.name,
+    token: visitor.token,
+    publicToken: visitor.publicToken,
+    carNumber: visitor.carNumber,
+  }).catch(() => {});
+
   return visitor;
 }
 
@@ -502,6 +638,11 @@ async function trackByPublicToken(idOrToken) {
 }
 
 module.exports = {
+  searchVisitors,
+  getByPublicToken,
+  markRetrievalRequested,
+  suggestPlates,
+  normalisePlate,
   listVisitors, getVisitor, createVisitor, updateVisitor,
   assignDriver, acceptTask, rejectTask, markPickedUp, cancelVisitor,
   markParked, requestRetrieval, assignRetrievalDriver, markRetrieved, confirmDelivered,

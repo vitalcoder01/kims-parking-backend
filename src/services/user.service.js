@@ -210,7 +210,7 @@ async function updateOwnProfile(id, { carNumber, phone }) {
       const patched = await prisma.parkingTask.update({
         where: { id: task.id },
         data: { carNumber: updated.carNumber },
-        include: { doctor: true, driver: { include: { user: true } } },
+        include: { doctor: true, visitor: true, driver: { include: { user: true } } },
       });
       realtime.emitAll('task:upsert', serializeTask(patched));
     }

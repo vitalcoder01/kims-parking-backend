@@ -54,6 +54,11 @@ app.get('/track/:id', (req, res) => {
   res.send(renderTrackPage(req.params.id));
 });
 
+// WhatsApp webhook — Meta calls this, so it sits outside /api and its auth.
+// Mounted before the rate limiter for the same reason: throttling Meta's
+// delivery attempts would just make it retry.
+app.use('/webhooks/whatsapp', require('./routes/whatsapp.routes'));
+
 app.use('/api', routes);
 
 app.use(notFoundHandler);
