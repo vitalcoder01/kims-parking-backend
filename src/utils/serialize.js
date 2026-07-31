@@ -15,6 +15,12 @@ function serializeTask(task) {
     type: task.type,
     doctorId: task.doctorId,
     doctorName: task.doctor?.name,
+    // Who this person actually is, for the valet about to dispatch someone on
+    // their behalf. Same two fields the arrival notice already exposes, so
+    // this widens no privacy surface — deliberately NOT the phone number,
+    // which serializeTask would hand to every driver as well.
+    doctorDepartment: task.doctor?.department ?? undefined,
+    doctorEmployeeId: task.doctor?.employeeId ?? undefined,
     carNumber: task.carNumber,
     slotId: task.slotId ?? undefined,
     driverId: task.driverId ?? undefined,
@@ -79,6 +85,10 @@ function serializeDriver(driver) {
     phone: driver.user?.phone,
     status: driver.status,
     currentTaskId: driver.currentTaskId ?? undefined,
+    // Jobs finished today. Undefined rather than 0 when it wasn't computed
+    // (single-driver lookups don't run the grouped query), so the UI can tell
+    // "none yet" from "not known" instead of asserting a zero it can't back up.
+    completedToday: driver.completedToday,
   };
 }
 
