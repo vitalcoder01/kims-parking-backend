@@ -954,7 +954,7 @@ async function cancelTask(taskId, byDoctorId) {
   assertTransition(task, ['requested', 'accepted', 'assigned'], 'cancel');
   watchdog.disarm('task', taskId);
 
-  const { updated, freedDriver } = await runSerializable(async tx => {
+  const { updated, freedDriver, restoredParkId } = await runSerializable(async tx => {
     const result = await tx.parkingTask.update({
       where: { id: taskId },
       data: { status: 'cancelled', completedAt: new Date() },
@@ -963,7 +963,31 @@ async function cancelTask(taskId, byDoctorId) {
     // A driver left mid-assignment would otherwise stay stuck 'busy' on a
     // task that no longer exists in any meaningful sense.
     const freed = await freeDriverIfStillOn(tx, task.driverId, taskId);
-    return { updated: result, freedDriver: freed };
+
+    // Cancelling a departure means the car is STILL PARKED — it never left
+    // its slot. But requestRetrieval retired the park task to make this
+    // retrieve the doctor's current row, so cancelling used to leave a
+    // cancelled retrieve as the only current row. The doctor's screen reads
+    // that as "no session at all" and falls back to the arrival prompt,
+    // while their car sits in the slot with no way to ask for it again.
+    //
+    // So hand the session back to the park task that still owns the slot.
+    // ParkingSlot.taskId points straight at it (set by markParked), so there
+    // is no guessing about which row to restore.
+    let restored = null;
+    if (task.type === 'retrieve') {
+      const slot = await tx.parkingSlot.findFirst({
+        where: { status: 'occupied', doctorId: task.doctorId, taskId: { not: null } },
+      });
+      if (slot?.taskId) {
+        // Step down before promoting: "at most one isCurrent row per doctor"
+        // is a partial unique index, and the other order trips it.
+        await tx.parkingTask.update({ where: { id: taskId }, data: { isCurrent: false } });
+        await tx.parkingTask.update({ where: { id: slot.taskId }, data: { isCurrent: true } });
+        restored = slot.taskId;
+      }
+    }
+    return { updated: result, freedDriver: freed, restoredParkId: restored };
   });
 
   cache.invalidate('tasks:');
@@ -972,6 +996,12 @@ async function cancelTask(taskId, byDoctorId) {
     emitDriverPatch(task.driverId, 'available', null);
   }
   emitTask(updated);
+  // The park row is current again, so every client has to see it — otherwise
+  // the doctor's app keeps the cancelled retrieve and still shows no car.
+  if (restoredParkId) {
+    const restored = await prisma.parkingTask.findUnique({ where: { id: restoredParkId }, include: taskInclude });
+    if (restored) emitTask(restored);
+  }
 
   // Whoever was working this needs telling, or a valet walks out to a car
   // nobody is coming for and a driver drives to a slot for no reason.
