@@ -88,6 +88,18 @@ model ParkingTask {
   // migration is needed; the name is corrected here because calling it "eta"
   // is precisely what invited it to be rendered as an arrival estimate.
   plannedDepartureMinutes Int? @map("eta")
+  // The absolute moment the doctor intends to leave. Derived from the minutes
+  // above at request time, then stored, because scheduling needs a fixed point
+  // the database can be queried against — "requestedAt + N minutes - lead
+  // time" is not something a sweep can index or filter on. The minutes column
+  // stays for rollout compatibility with installed apps.
+  plannedDepartureAt      DateTime?
+  // plannedDepartureAt minus the configured lead time: the moment the valet
+  // should START the retrieval, and the moment this request stops being
+  // informational and becomes actionable. Stored rather than recomputed so a
+  // later change to the lead-time setting cannot retroactively move the
+  // deadline of a request already in flight.
+  retrievalReadyAt        DateTime?
   trackingProgress  Float?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
@@ -172,6 +184,7 @@ model ParkingTask {
   // unique index over (driverId) WHERE status IN (assigned, key_collected,
   // in_transit), written by hand in the migration since Prisma's DSL can't
   // express a WHERE-qualified unique constraint.
+  @@index([retrievalReadyAt])
   @@index([doctorId])
   @@index([doctorId, createdAt])
   @@index([driverId])

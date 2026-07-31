@@ -7,6 +7,7 @@ const arrivalNoticeService = require('./arrivalNotice.service');
 const notificationService = require('./notification.service');
 const assignLocks = require('./assignLocks');
 const jobAlerts = require('./jobAlerts');
+const settingService = require('./setting.service');
 const runSerializable = require('../utils/runSerializable');
 const { serializeTask, serializeSlot } = require('../utils/serialize');
 
@@ -65,6 +66,16 @@ function isRetrievalOpenToAll(task) {
   // loses the action the moment someone takes it, even mid-recovery.
   if (task.retrievalOwnerValetId != null) return task.escalatedAt != null;
   return task.recoveryBroadcastAt != null || task.escalatedAt != null;
+}
+
+// A departure booked for later is informational until its lead time is
+// reached. Hiding the buttons is not enough on its own — a client holding a
+// stale card, or one that never refreshed, would still be able to call the
+// endpoint. This is the server-side half of that rule.
+function isRetrievalScheduled(task) {
+  if (task.type !== 'retrieve') return false;
+  if (task.retrievalReadyAt == null) return false;   // pre-scheduling row
+  return new Date(task.retrievalReadyAt).getTime() > Date.now();
 }
 
 function isVisibleToValet(task, valetId) {
@@ -285,6 +296,23 @@ async function createTask({ type, doctorId, carNumber, slotId, valetId }) {
 // display derives from that pair so it stays correct as time passes.
 const MAX_PLANNED_DEPARTURE_MINUTES = 24 * 60;
 
+// Extracted so the scheduler sweep and this path raise the identical alert —
+// two copies of the same message drifting apart is how a doctor ends up
+// described one way at request time and another way ten minutes later.
+function notifyRetrievalOwner(task) {
+  const owner = task.arrivalOwnerValetId;
+  const who = task.doctor?.name ?? 'A doctor';
+  const body = `${who} is leaving and needs ${task.carNumber}. Please assign a driver.`;
+  // `valet:<id>` addresses one person; the bare role name would broadcast to
+  // everyone and defeat the entire point of ownership. With no owner (a car
+  // parked before ownership existed, or an owner whose account is gone) it
+  // goes to the floor — correct, not a fallback: an unowned car still has to
+  // be retrieved.
+  return notificationService.push(owner
+    ? { targetRole: `valet:${owner}`, targetUserId: owner, title: '🚗 Car requested — your session', body, type: 'alarm' }
+    : { targetRole: 'valet', title: '🚗 Car requested', body, type: 'alarm' });
+}
+
 async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
   if (plannedDepartureMinutes != null
       && (!Number.isInteger(plannedDepartureMinutes)
@@ -297,6 +325,17 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
   // assignDriver below), since that's the actual physical handover spot,
   // and it naturally supports multiple valets each at their own location
   // instead of a single fixed point.
+  // Scheduling is resolved ONCE, here, and stored. Recomputing it later from
+  // the lead-time setting would let an operator changing that setting move the
+  // deadline of every request already in flight.
+  const now = Date.now();
+  const leadMs = await settingService.getRetrievalLeadTimeMs();
+  const departureAt = new Date(now + (plannedDepartureMinutes ?? 0) * 60000);
+  const readyAt = new Date(departureAt.getTime() - leadMs);
+  // "Now", or so close that the lead time has already elapsed — nothing to
+  // schedule, so it is actionable immediately.
+  const readyNow = readyAt.getTime() <= now;
+
   const task = await runSerializable(async (tx) => {
     const slot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
     if (!slot) throw ApiError.badRequest('No parked car found for your account');
@@ -335,16 +374,21 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
         status: 'requested',
         requestedAt: new Date(),
         plannedDepartureMinutes: plannedDepartureMinutes ?? null,
+        plannedDepartureAt: departureAt,
+        retrievalReadyAt: readyAt,
         destinationLat: null,
         destinationLng: null,
         isCurrent: true,
-        // Owner-only window opens now. Until it lapses, no other valet sees
-        // this request (see listRetrievalRequestsFor / jobAlerts recovery).
         arrivalOwnerValetId: parkTask?.arrivalOwnerValetId ?? null,
         arrivalAcceptedAt: parkTask?.arrivalAcceptedAt ?? null,
         valetId: parkTask?.arrivalOwnerValetId ?? null,
         valetClaimedAt: parkTask?.arrivalOwnerValetId ? new Date() : null,
-        ownerNotifiedAt: parkTask?.arrivalOwnerValetId ? new Date() : null,
+        // The owner's response clock starts when they are NOTIFIED, not when
+        // the doctor submitted. A departure booked for 3pm must not burn its
+        // 60-second window at 9am and hand itself to recovery six hours
+        // early. Left null while the request is still SCHEDULED; the sweep
+        // stamps it at the moment it actually alerts them.
+        ownerNotifiedAt: readyNow ? new Date() : null,
       },
       include: taskInclude,
     });
@@ -357,22 +401,11 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
   // With no owner (a car parked before ownership existed, or a session whose
   // owner's account is gone) it goes to the floor — that's correct, not a
   // fallback: an unowned car still has to be retrieved.
-  const owner = task.arrivalOwnerValetId;
-  const who = task.doctor?.name ?? 'A doctor';
-  notificationService.push(owner
-    ? {
-        targetRole: `valet:${owner}`,
-        targetUserId: owner,
-        title: '🚗 Car requested — your session',
-        body: `${who} is leaving and needs ${task.carNumber}. Please assign a driver.`,
-        type: 'alarm',
-      }
-    : {
-        targetRole: 'valet',
-        title: '🚗 Car requested',
-        body: `${who} is leaving and needs ${task.carNumber}. Please assign a driver.`,
-        type: 'alarm',
-      }).catch(() => {});
+  // Only alert now if there is nothing to wait for. A future departure stays
+  // silent and sits on the Retrieval Requests page as an informational
+  // SCHEDULED row until the sweep promotes it at readyAt — alerting at submit
+  // time is precisely what made a 3pm departure ring a valet's phone at 9am.
+  if (readyNow) notifyRetrievalOwner(task).catch(() => {});
 
   return task;
 }
@@ -418,6 +451,13 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
         if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt) {
           const owner = await tx.user.findUnique({ where: { id: existing.valetId }, select: { name: true } });
           throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
+        }
+
+        // Not yet due. Refused for everyone, owner included: the whole point
+        // of a lead time is that work starts then, not whenever a card
+        // happens to be tapped.
+        if (existing.type === 'retrieve' && isRetrievalScheduled(existing)) {
+          throw ApiError.conflict('This departure is scheduled for later and is not ready yet', 'NOT_READY');
         }
 
         // Session ownership, enforced on the write path rather than only in
@@ -1126,6 +1166,11 @@ async function markReturned(taskId, driverId) {
 
 module.exports = {
   isVisibleToValet,
+  isRetrievalScheduled,
+  notifyRetrievalOwner,
+  // Exported so the scheduler sweep emits through the SAME ownership-aware
+  // path, rather than re-implementing who is allowed to see a retrieval.
+  emitTask,
   isRetrievalOpenToAll,
   listTasks,
   getTask,

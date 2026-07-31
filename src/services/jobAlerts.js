@@ -6,6 +6,11 @@ const { serializeTask, serializeVisitor } = require('../utils/serialize');
 const ApiError = require('../utils/ApiError');
 const valetRoster = require('./valetRoster');
 
+// Lazy, matching acceptWatchdog: task.service requires THIS module, so a
+// top-level require here would be circular and one of the two would see an
+// empty object at load time.
+function taskService() { return require('./task.service'); }
+
 // Who gets told when a job needs a valet's attention (driver rejected, or
 // never accepted in time).
 //
@@ -122,6 +127,55 @@ let sweepTimer = null;
 //
 // The original arrivalOwnerValetId is deliberately left untouched: the record
 // of who took that car in is history, not a routing field.
+// SCHEDULED -> READY. A departure booked for later sits silent on the
+// Retrieval Requests page until its lead time is reached; this is what makes
+// it actionable and alerts the one valet who owns it.
+//
+// Runs on the same sweep as everything else rather than a per-request timer,
+// so it survives a restart for free — an in-memory timer for a departure six
+// hours out would simply be lost on the next deploy.
+async function promoteScheduledRetrievals() {
+  const now = new Date();
+  const due = await prisma.parkingTask.findMany({
+    where: {
+      type: 'retrieve',
+      status: 'requested',
+      isCurrent: true,
+      driverId: null,
+      retrievalReadyAt: { lte: now },
+      // Not yet alerted — this is the flag that makes the promotion happen
+      // exactly once, and it is also what starts the owner's response clock.
+      ownerNotifiedAt: null,
+    },
+    include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+    take: 50,
+  });
+
+  let promoted = 0;
+  for (const task of due) {
+    // Conditional so two sweep ticks — or two server processes — cannot both
+    // promote the same row and alert the owner twice.
+    const won = await prisma.parkingTask.updateMany({
+      where: { id: task.id, ownerNotifiedAt: null },
+      data: { ownerNotifiedAt: now, valetClaimedAt: now },
+    });
+    if (won.count === 0) continue;
+
+    const fresh = await prisma.parkingTask.findUnique({
+      where: { id: task.id },
+      include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+    });
+    if (!fresh) continue;
+
+    // The row's own delta — this is what flips it from SCHEDULED to READY on
+    // the page. taskService.emitTask keeps it addressed to the owner alone.
+    taskService().emitTask(fresh);
+    await taskService().notifyRetrievalOwner(fresh).catch(() => {});
+    promoted += 1;
+  }
+  return promoted;
+}
+
 async function releaseUnansweredRetrievals() {
   const cutoff = new Date(Date.now() - await settingService.getOwnerResponseWindowMs());
 
@@ -136,7 +190,10 @@ async function releaseUnansweredRetrievals() {
       // responding, and an owner who assigned a driver has driverId set.
       retrievalOwnerValetId: null,
       recoveryBroadcastAt: null,
-      ownerNotifiedAt: { lt: cutoff },
+      // Null means the owner has not been alerted yet — the request is still
+      // SCHEDULED. Recovery measures from the notification, so a departure
+      // booked for later cannot be "unanswered" before anyone was asked.
+      ownerNotifiedAt: { not: null, lt: cutoff },
     },
     include: { doctor: true, arrivalOwnerValet: true },
     take: 50,
@@ -201,6 +258,14 @@ async function releaseUnansweredRetrievals() {
 // guard as arrival accept: the loser's UPDATE matches zero rows, so the
 // database decides, not whose tap reached the server on a faster network.
 async function claimRetrieval(taskId, valetId) {
+  // Same rule as assignDriver: a scheduled departure cannot be accepted
+  // early, whoever is asking. Checked before the claim so the answer is the
+  // honest reason rather than a generic "no longer available".
+  const pre = await prisma.parkingTask.findUnique({ where: { id: taskId } });
+  if (pre && taskService().isRetrievalScheduled(pre)) {
+    throw ApiError.conflict('This departure is scheduled for later and is not ready yet', 'NOT_READY');
+  }
+
   const claimed = await prisma.parkingTask.updateMany({
     where: {
       id: taskId,
@@ -360,13 +425,19 @@ async function escalateStalledJobs() {
     }).catch(() => {});
   }
 
+  const promoted = await promoteScheduledRetrievals().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn('[jobAlerts] scheduled promotion failed:', err.message);
+    return 0;
+  });
+
   const released = await releaseUnansweredRetrievals().catch((err) => {
     // eslint-disable-next-line no-console
     console.warn('[jobAlerts] retrieval release failed:', err.message);
     return 0;
   });
 
-  return tasks.length + visitors.length + released;
+  return tasks.length + visitors.length + released + promoted;
 }
 
 function startEscalationSweep() {
@@ -387,6 +458,7 @@ function stopEscalationSweep() {
 
 module.exports = {
   touchOwnerWindow,
+  promoteScheduledRetrievals,
   releaseUnansweredRetrievals,
   claimRetrieval,
   alertTaskNeedsDriver,

@@ -124,11 +124,19 @@ const getSettings = asyncHandler(async (req, res) => {
 
 const updateSettings = asyncHandler(async (req, res) => {
   if (!req.body || typeof req.body !== 'object') throw ApiError.badRequest('settings object required');
-  for (const key of ['driverAcceptTimeoutSeconds', 'ownerResponseWindowSeconds']) {
+  for (const key of ['driverAcceptTimeoutSeconds', 'ownerResponseTimeoutSeconds', 'ownerResponseWindowSeconds']) {
     if (req.body[key] === undefined) continue;
     const n = Number(req.body[key]);
     if (!Number.isFinite(n) || n < 10 || n > 600) {
       throw ApiError.badRequest(`${key} must be between 10 and 600`);
+    }
+  }
+  // Lead time has its own range: 0 is valid ("start as soon as they ask"),
+  // and hours ahead is reasonable for a planned departure.
+  if (req.body.retrievalLeadTimeMinutes !== undefined) {
+    const n = Number(req.body.retrievalLeadTimeMinutes);
+    if (!Number.isInteger(n) || n < 0 || n > 240) {
+      throw ApiError.badRequest('retrievalLeadTimeMinutes must be between 0 and 240');
     }
   }
   res.json({ settings: await settingService.update(req.body) });

@@ -53,6 +53,12 @@ function serializeTask(task) {
     recalledAt: task.recalledAt ?? undefined,
     // Planned departure, not an ETA — see ParkingTask in schema.prisma.
     plannedDepartureMinutes: task.plannedDepartureMinutes ?? undefined,
+    // Absolute departure time, and the moment the request becomes actionable
+    // (departure minus the configured lead time). Sent so the app can render
+    // SCHEDULED vs READY without knowing the lead-time setting, and without
+    // recomputing a deadline the server already fixed.
+    plannedDepartureAt: task.plannedDepartureAt ?? undefined,
+    retrievalReadyAt: task.retrievalReadyAt ?? undefined,
     trackingProgress: task.trackingProgress ?? undefined,
     driverLat: task.driverLat ?? undefined,
     driverLng: task.driverLng ?? undefined,

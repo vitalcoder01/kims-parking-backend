@@ -8,9 +8,13 @@ const DEFAULTS = {
   driverAcceptTimeoutSeconds: '60',
   // Seconds the valet who owns a parking session gets to respond to that
   // doctor's departure request before it is released to every available
-  // valet. Configurable because "how long is too long" is an operations
-  // call, not a code constant.
-  ownerResponseWindowSeconds: '60',
+  // valet. The clock starts when they are NOTIFIED, not when the doctor
+  // submitted — a departure booked for 3pm must not burn its window at 9am.
+  ownerResponseTimeoutSeconds: '60',
+  // How far ahead of the doctor's planned departure the valet should start.
+  // A request sits on the Retrieval Requests page as informational until
+  // this point, then becomes actionable and the owner is notified.
+  retrievalLeadTimeMinutes: '10',
 };
 
 const CACHE_TTL_MS = 5000;
@@ -39,9 +43,20 @@ async function getAcceptTimeoutMs() {
 }
 
 async function getOwnerResponseWindowMs() {
-  const raw = Number(await get('ownerResponseWindowSeconds'));
+  // Falls back to the old key so a database that already has the previous
+  // setting row keeps the operator's chosen value through the rename.
+  const all = await getAll();
+  const raw = Number(all.ownerResponseTimeoutSeconds ?? all.ownerResponseWindowSeconds);
   const seconds = Number.isFinite(raw) && raw >= 10 ? raw : 60;
   return seconds * 1000;
+}
+
+async function getRetrievalLeadTimeMs() {
+  const raw = Number(await get('retrievalLeadTimeMinutes'));
+  // 0 is meaningful — it means "act the moment the doctor says they're
+  // leaving" — so this floors at 0 rather than falling back on falsiness.
+  const minutes = Number.isFinite(raw) && raw >= 0 && raw <= 240 ? raw : 10;
+  return minutes * 60 * 1000;
 }
 
 async function update(patch) {
@@ -57,4 +72,4 @@ async function update(patch) {
   return getAll();
 }
 
-module.exports = { getAll, get, getAcceptTimeoutMs, getOwnerResponseWindowMs, update, DEFAULTS };
+module.exports = { getAll, get, getAcceptTimeoutMs, getOwnerResponseWindowMs, getRetrievalLeadTimeMs, update, DEFAULTS };
