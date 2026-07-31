@@ -22,17 +22,10 @@ async function firstTwoValetIds() {
   return rows.map(r => r.id);
 }
 
-// The only valet, when there is exactly one. Null with zero or several — with
-// several, who owns what is theirs to race for and nothing should pre-empt it.
-async function soleValetId() {
-  const ids = await firstTwoValetIds();
-  return ids.length === 1 ? ids[0] : null;
-}
-
 // True when there is nobody to escalate TO, so a broadcast is just the same
 // alarm reaching the same phone a second time.
 async function isSoloValetSite() {
   return (await firstTwoValetIds()).length <= 1;
 }
 
-module.exports = { soleValetId, isSoloValetSite };
+module.exports = { isSoloValetSite };

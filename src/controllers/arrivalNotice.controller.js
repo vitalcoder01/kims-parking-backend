@@ -11,10 +11,10 @@ const create = asyncHandler(async (req, res) => {
   res.status(201).json({ arrival: serializeArrivalNotice(notice) });
 });
 
-// Valet: "Accept" on a broadcast arrival request. Whoever lands here first
-// owns the resulting parking session; everyone else gets the conflict.
+// Deprecated no-op, kept so old installed builds don't 404 on their Accept
+// button. There is nothing to accept: an arrival is a heads-up.
 const accept = asyncHandler(async (req, res) => {
-  const notice = await svc.accept(parseId(req.params.id), req.user.id);
+  const notice = await svc.accept(parseId(req.params.id));
   res.json({ arrival: serializeArrivalNotice(notice) });
 });
 

@@ -141,10 +141,6 @@ function serializeArrivalNotice(n) {
     doctorDepartment: n.doctor?.department ?? undefined,
     doctorEmployeeId: n.doctor?.employeeId ?? undefined,
     eta: n.eta,
-    // Null while the request is still up for grabs by any valet.
-    ownerValetId: n.ownerValetId ?? undefined,
-    ownerValetName: n.ownerValet?.name,
-    arrivalAcceptedAt: n.arrivalAcceptedAt ?? undefined,
     createdAt: n.createdAt,
   };
 }
