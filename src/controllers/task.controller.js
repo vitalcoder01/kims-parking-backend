@@ -162,6 +162,14 @@ const cancel = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Doctor/staff: call off a departure they asked for. Scoped to their own car
+// by passing their id — the service refuses anyone else's, and refuses once
+// the driver has actually set off.
+const cancelMyRetrieval = asyncHandler(async (req, res) => {
+  const task = await taskService.cancelTask(parseId(req.params.id), req.user.id);
+  res.json({ task: serializeTask(task) });
+});
+
 // Driver: live GPS ping. Only the driver assigned to this task may report a
 // position for it — otherwise any driver could spoof another's location.
 const updateLocation = asyncHandler(async (req, res) => {
@@ -174,4 +182,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, acceptRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };

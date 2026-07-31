@@ -19,6 +19,10 @@ router.patch('/:id/park', requireRole('driver', 'admin'), ctrl.park);
 router.patch('/:id/retrieve', requireRole('driver', 'admin'), ctrl.retrieve);
 router.patch('/:id/confirm-delivered', requireRole('valet', 'admin'), ctrl.confirmDelivered);
 router.patch('/:id/cancel', requireRole('valet', 'admin'), ctrl.cancel);
+// Doctor/staff calling off their own departure request. Separate route from
+// the valet's cancel so the caller's identity is unambiguous — the service
+// scopes on it rather than trusting a body field.
+router.patch('/:id/cancel-my-retrieval', requireRole('doctor', 'staff', 'admin'), ctrl.cancelMyRetrieval);
 // Valet claims a departure request (owner, or recovery after the owner's
 // window lapsed). First one through the door wins.
 router.patch('/:id/accept-retrieval', requireRole('valet'), ctrl.acceptRetrieval);

@@ -275,12 +275,22 @@ async function createTask({ type, doctorId, carNumber, slotId, valetId }) {
 // Doctor/staff: request retrieval of their own currently-parked car. This is
 // the ONLY way a retrieve task can come into existence — the valet cannot
 // invent one — so a driver never gets sent to pull a car nobody asked for.
-// Allowed planned-departure values. 0 means "leaving now".
-const PLANNED_DEPARTURE_MINUTES = [0, 10, 20, 30, 40];
+// Planned departure is minutes from NOW — 0 means "leaving now". It used to
+// be a fixed menu; the doctor can now name an arbitrary clock time, so this is
+// a range instead. Capped at 24h because the picker only ever offers the next
+// occurrence of a time of day, which cannot be further away than that.
+//
+// Stored as minutes rather than an absolute timestamp so no migration is
+// needed. The real deadline is always requestedAt + these minutes, and every
+// display derives from that pair so it stays correct as time passes.
+const MAX_PLANNED_DEPARTURE_MINUTES = 24 * 60;
 
 async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
-  if (plannedDepartureMinutes != null && !PLANNED_DEPARTURE_MINUTES.includes(plannedDepartureMinutes)) {
-    throw ApiError.badRequest(`plannedDepartureMinutes must be one of ${PLANNED_DEPARTURE_MINUTES.join(', ')}`);
+  if (plannedDepartureMinutes != null
+      && (!Number.isInteger(plannedDepartureMinutes)
+        || plannedDepartureMinutes < 0
+        || plannedDepartureMinutes > MAX_PLANNED_DEPARTURE_MINUTES)) {
+    throw ApiError.badRequest(`plannedDepartureMinutes must be a whole number of minutes between 0 and ${MAX_PLANNED_DEPARTURE_MINUTES}`);
   }
   // No destination yet at request time — the real pickup point is wherever
   // the valet who assigns a driver to this happens to be standing (see
@@ -797,6 +807,25 @@ async function markRetrieved(taskId, driverId) {
   emitTask(task);
   if (slot) emitSlot(slot);
   if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
+
+  // The one moment in a retrieval that the doctor actually has to act on:
+  // their car is downstairs. Everything earlier in the journey (a valet took
+  // the request, a driver was assigned, the driver set off) is already on
+  // their Vehicle Status card in real time, and none of it asks anything of
+  // them — so it stays silent. This is the only push they get.
+  //
+  // Raised here rather than from the driver's app so a driver whose phone
+  // dies right after tapping "delivered" doesn't leave the doctor waiting
+  // upstairs with no idea the car has arrived. 'info', not 'alarm': it
+  // vibrates on the normal channel instead of ringing like a job alert.
+  notificationService.push({
+    targetRole: `doctor:${task.doctorId}`,
+    targetUserId: task.doctorId,
+    title: '🚗 Your car is ready',
+    body: `${task.carNumber} is waiting at the valet counter.`,
+    type: 'info',
+  }).catch(() => {});
+
   return task;
 }
 
@@ -898,8 +927,26 @@ async function updateLocation(taskId, lat, lng, driverId) {
 // or genuinely abandoned) without waiting for a new session to naturally
 // supersede it. Terminal, same weight as completed — just an honest outcome
 // instead of a silent one.
-async function cancelTask(taskId) {
+// `byDoctorId` is set when a doctor/staff member cancels their own departure
+// request from their app, and is what scopes them to their own car. Left
+// undefined for valet/admin cancels, which may act on any job.
+async function cancelTask(taskId, byDoctorId) {
   const task = await getTask(taskId);
+
+  if (byDoctorId !== undefined) {
+    if (task.doctorId !== byDoctorId) throw ApiError.forbidden('This is not your car');
+    // A doctor may call off a departure they asked for. They have no business
+    // voiding a parking job a valet is running.
+    if (task.type !== 'retrieve') throw ApiError.conflict('Only a departure request can be cancelled', 'JOB_GONE');
+    // Once the driver has set off the car is physically out of its slot, and
+    // "cancel" would strand it between the slot and the counter with no job
+    // describing where it should go. The honest answer is that it is already
+    // coming, and the valet takes it from there.
+    if (task.status === 'in_transit' || task.status === 'delivered') {
+      throw ApiError.conflict('Your car is already on its way — please collect it at the valet counter', 'JOB_GONE');
+    }
+  }
+
   // Past the key handover a plain cancel isn't honest: a real car is
   // physically in a driver's hands. Those go through recallTask instead,
   // which tells the driver to bring it back rather than silently voiding a
@@ -925,6 +972,39 @@ async function cancelTask(taskId) {
     emitDriverPatch(task.driverId, 'available', null);
   }
   emitTask(updated);
+
+  // Whoever was working this needs telling, or a valet walks out to a car
+  // nobody is coming for and a driver drives to a slot for no reason.
+  if (byDoctorId !== undefined) {
+    const who = updated.doctor?.name ?? 'A doctor';
+    const owner = updated.retrievalOwnerValetId ?? updated.arrivalOwnerValetId ?? updated.valetId;
+    notificationService.push(owner
+      ? {
+          targetRole: `valet:${owner}`,
+          targetUserId: owner,
+          title: '❌ Departure cancelled',
+          body: `${who} cancelled the request for ${updated.carNumber}.`,
+          type: 'alarm',
+        }
+      : {
+          targetRole: 'valet',
+          title: '❌ Departure cancelled',
+          body: `${who} cancelled the request for ${updated.carNumber}.`,
+          type: 'alarm',
+        }).catch(() => {});
+
+    if (task.driverId) {
+      notificationService.push({
+        targetRole: `driver:${task.driverId}`,
+        title: '❌ Retrieval cancelled',
+        body: `${updated.carNumber} is no longer needed — stand down.`,
+        type: 'alarm',
+      }).catch(() => {});
+      // Their card is about to vanish; kill the assignment alarm at source.
+      realtime.emitToDriver(task.driverId, 'assignment:cancelled', { kind: 'task', id: taskId });
+    }
+  }
+
   return updated;
 }
 
