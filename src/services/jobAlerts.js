@@ -15,22 +15,22 @@ function taskService() { return require('./task.service'); }
 // never accepted in time).
 //
 // Previously every one of these woke EVERY valet on shift. Now the job's
-// owning valet is alarmed alone — but "alone" is only safe with a way out,
-// because a single unreachable owner (phone dead, logged out, FCM blocked
-// by battery optimisation) would otherwise mean a real car with a real
-// driver sits with nobody watching it. Escalating "to all valets" is a
-// no-op when there is only ONE valet and they're the one who's unreachable,
-// so the ladder has to end somewhere that isn't a valet at all:
+// owning valet is alarmed alone, and only escalates if they don't act:
 //
 //   1. the owning valet, alone
 //   2. -> every valet, once the owner has had their window and not acted
-//   3. -> admins, who can always reassign, and who are the actual backup in
-//         a single-valet operation
 //
-// Rung 3 is why this is safe to ship. The genuine backstop, though, isn't
-// any of these: it's that the job stays in the queue in a loud "needs a
-// driver" state that nobody can miss on next open. A push can silently fail;
-// the queue cannot.
+// There used to be a third rung that alarmed admins, on the reasoning that
+// "escalate to all valets" is a no-op on a single-valet site. Admins are
+// deliberately out of the alert path now: dispatch is not their job, and
+// being pulled into every stall on the floor with a prompt they had no
+// reason to answer made the alerts noise. They still receive all task DATA,
+// so their dashboard is unchanged — they simply stop being alarmed.
+//
+// That does remove the last automated rung on a single-valet site. The real
+// backstop was never the pushes anyway: it's that the job stays in the queue
+// in a loud "needs a driver" state nobody can miss on next open. A push can
+// silently fail; the queue cannot.
 
 // How long the owner gets before the rest of the valets are pulled in. Reuses
 // the admin-configured driver-accept window so operations only tune one knob.
@@ -38,12 +38,17 @@ async function ownerGraceMs() {
   return settingService.getAcceptTimeoutMs();
 }
 
+// Valets only. This event raises an actionable "assign another driver"
+// dialog, and dispatch is not an admin's job — they were being pulled into
+// every stall on the floor with a prompt they had no reason to answer.
+// Admins still receive all task DATA (see emitTask), so their dashboard is
+// unaffected; they simply stop being alarmed.
 function emitTaskReassign(task, driverName, rejected, scope) {
   const payload = { task: serializeTask(task), driverName, rejected, scope };
   if (scope === 'owner' && task.valetId) {
     realtime.emitToUser(task.valetId, 'task:needs-reassign', payload);
   } else {
-    realtime.emitToRoles(['valet', 'admin'], 'task:needs-reassign', payload);
+    realtime.emitToRoles(['valet'], 'task:needs-reassign', payload);
   }
 }
 
@@ -52,7 +57,7 @@ function emitVisitorReassign(visitor, driverName, rejected, scope) {
   if (scope === 'owner' && visitor.valetId) {
     realtime.emitToUser(visitor.valetId, 'visitor:needs-reassign', payload);
   } else {
-    realtime.emitToRoles(['valet', 'admin'], 'visitor:needs-reassign', payload);
+    realtime.emitToRoles(['valet'], 'visitor:needs-reassign', payload);
   }
 }
 
@@ -341,13 +346,19 @@ async function escalateStalledJobs() {
         valetId: { not: null },
         escalatedAt: null,
         valetClaimedAt: { lt: cutoff },
-        // A departure still inside its owner's private window belongs to the
-        // recovery pass below, not to this one — otherwise both would fire and
-        // the team would be pulled in twice for the same car.
+        // Every unclaimed departure belongs to the recovery pass below, not
+        // to this one. That covers all three of its states — scheduled for
+        // later, inside the owner's private window, and already broadcast —
+        // and recovery IS the escalation for them: it has already told every
+        // valet. Excluding only the first two meant a recovered request got a
+        // SECOND round one tick later ("still needs a driver" to the whole
+        // team) for a car the whole team had just been told about.
+        //
+        // A retrieval someone has actually claimed and then sat on still
+        // escalates here, which is the case this pass exists for.
         NOT: {
           type: 'retrieve',
           retrievalOwnerValetId: null,
-          recoveryBroadcastAt: null,
         },
       },
       include: { doctor: true, driver: { include: { user: true } }, valet: true },
@@ -396,14 +407,6 @@ async function escalateStalledJobs() {
         type: 'alarm',
       }).catch(() => {});
     }
-    // Rung 3: admins — the real backup when there's only one valet and
-    // they're the one who's unreachable.
-    await notificationService.push({
-      targetRole: 'admin',
-      title: '⚠️ Job unattended',
-      body: `${task.carNumber} (${task.doctor?.name ?? 'staff'}) still has no driver assigned.`,
-      type: 'alarm',
-    }).catch(() => {});
   }
 
   for (const visitor of visitors) {
@@ -417,12 +420,6 @@ async function escalateStalledJobs() {
         type: 'alarm',
       }).catch(() => {});
     }
-    await notificationService.push({
-      targetRole: 'admin',
-      title: '⚠️ Visitor pickup unattended',
-      body: `${visitor.name}'s pickup still has no driver assigned.`,
-      type: 'alarm',
-    }).catch(() => {});
   }
 
   const promoted = await promoteScheduledRetrievals().catch((err) => {
