@@ -122,6 +122,11 @@ async function fireTaskTimeout(taskId, driverId) {
   const serialized = serializeTask(updated);
   realtime.emitAll('task:upsert', serialized);
   realtime.emitAll('driver:patch', { id: driverId, status: 'available', currentTaskId: null });
+  // Addressed straight at the driver who just lost it, rather than leaving
+  // them to infer it from a broadcast. Their alarm notification is `ongoing`
+  // — it cannot be swiped away — so if they miss this they are left holding a
+  // live-looking alarm for a job that is no longer theirs.
+  realtime.emitToDriver(driverId, 'assignment:cancelled', { kind: 'task', id: taskId });
   // Owner-targeted rather than broadcast to every valet — jobAlerts decides
   // who to address, and its sweep escalates if the owner doesn't act.
   await jobAlerts().alertTaskNeedsDriver(updated, driverName);
@@ -147,6 +152,7 @@ async function fireVisitorTimeout(visitorId, driverId) {
   cache.invalidate('visitors:');
   cache.invalidate('drivers:');
   const { updated, driverName } = rolledBack;
+  realtime.emitToDriver(driverId, 'assignment:cancelled', { kind: 'visitor', id: visitorId });
   const serialized = serializeVisitor(updated);
   realtime.emitAll('visitor:upsert', serialized);
   realtime.emitAll('driver:patch', { id: driverId, status: 'available', currentTaskId: null });

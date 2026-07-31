@@ -96,7 +96,12 @@ function assertTransition(task, allowed, action) {
 function assertOwnDriver(task, driverId) {
   if (driverId === undefined) return;
   if (task.driverId !== driverId) {
-    throw ApiError.forbidden('You are not the driver assigned to this task');
+    // JOB_GONE rather than 403: a driver reaching one of these is almost
+    // always acting on a screen the server has already invalidated — the job
+    // was rolled back or reassigned while their card still showed it. Tagging
+    // it lets the app clear that card; a bare 403 read as an accusation and
+    // left the dead card exactly where it was.
+    throw ApiError.conflict('This job has already moved on', 'JOB_GONE');
   }
 }
 
@@ -512,7 +517,13 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
       cache.invalidate('drivers:');
       emitTask(task);
       emitDriverPatch(driverId, 'busy', taskId);
-      if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
+      if (previousDriverId) {
+        emitDriverPatch(previousDriverId, 'available', null);
+        // The valet moved this job to someone else while the first driver was
+        // still being asked. Same reason as the timeout path: kill their alarm
+        // at the source instead of hoping they're online for the broadcast.
+        realtime.emitToDriver(previousDriverId, 'assignment:cancelled', { kind: 'task', id: taskId });
+      }
       // Alerting the driver is this operation's job, not the calling app's.
       // It used to be fired client-side right after this call returned, so a
       // valet whose phone died (or lost signal) in that gap left a real
@@ -556,7 +567,14 @@ async function acceptTask(taskId, driverId) {
   const { task, alreadyAccepted } = await runSerializable(async (tx) => {
     const existing = await tx.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
     if (!existing) throw ApiError.notFound('Task not found');
-    if (existing.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this task');
+    // Tagged JOB_GONE, not 403. By the time a driver taps Accept on a stale
+    // screen the assignment has usually been rolled back by the watchdog or
+    // moved to someone else — that is the job changing under them, not them
+    // reaching for something they were never given. The tag is what lets the
+    // app clear the dead card instead of showing a raw error and leaving it.
+    if (existing.driverId !== driverId) {
+      throw ApiError.conflict('This job has already moved on', 'JOB_GONE');
+    }
     assertTransition(existing, ['assigned'], 'accept');
     if (existing.acceptedAt) return { task: existing, alreadyAccepted: true };
 
@@ -583,7 +601,9 @@ async function rejectTask(taskId, driverId) {
   const result = await runSerializable(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
     if (!task) throw ApiError.notFound('Task not found');
-    if (task.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this task');
+    if (task.driverId !== driverId) {
+      throw ApiError.conflict('This job has already moved on', 'JOB_GONE');
+    }
     assertTransition(task, ['assigned'], 'reject');
 
     const driverName = task.driver?.user?.name ?? 'Driver';

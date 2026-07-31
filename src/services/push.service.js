@@ -86,7 +86,11 @@ async function resolveTargetUserIds(targetRole, targetUserId) {
 // Fire-and-forget: notification delivery must never fail the API call that
 // triggered it. Alarm-type pushes ride the alarm channel with max priority
 // so Android shows them loud even with the app dead.
-async function pushToUsers(userIds, { title, body, type = 'info', data = {} }) {
+// `notifId` becomes the notification's id on the device. Both delivery paths
+// (this push, and the socket's notification:new) carry it, so the same event
+// resolves to ONE tray entry instead of two — see displayNotification on the
+// app side. Every value in an FCM data payload must be a string.
+async function pushToUsers(userIds, { title, body, type = 'info', notifId, data = {} }) {
   const m = init();
   if (!m || userIds.length === 0) return;
 
@@ -95,7 +99,7 @@ async function pushToUsers(userIds, { title, body, type = 'info', data = {} }) {
 
   const message = {
     tokens: tokens.map(t => t.token),
-    data: { title, body, type, ...data },
+    data: { title, body, type, ...(notifId != null ? { notifId: String(notifId) } : {}), ...data },
     android: {
       priority: 'high',
       ttl: 5 * 60 * 1000,

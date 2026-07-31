@@ -140,6 +140,10 @@ function serializeArrivalNotice(n) {
     // skips the code lookup, so this is the only place left to get them).
     doctorDepartment: n.doctor?.department ?? undefined,
     doctorEmployeeId: n.doctor?.employeeId ?? undefined,
+    // The 3-digit valet code. This is what a doctor reads out at the counter,
+    // so it's the primary thing the valet searches this list by once it's
+    // long enough to need searching. Valets already look people up by it.
+    doctorCardCode: n.doctor?.cardCode ?? undefined,
     eta: n.eta,
     createdAt: n.createdAt,
   };

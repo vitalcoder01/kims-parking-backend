@@ -70,7 +70,9 @@ const assignDriver = asyncHandler(async (req, res) => {
 async function assertOwnDriverVisitor(req, id) {
   const visitor = await visitorService.getVisitor(id);
   if (req.user.role !== 'admin' && visitor.driverId !== req.user.driver?.id) {
-    throw ApiError.forbidden('You are not the driver assigned to this pickup');
+    // JOB_GONE, same reasoning as task.service.js assertOwnDriver — this is
+    // reached by a stale screen far more often than by a real intruder.
+    throw ApiError.conflict('This pickup has already moved on', 'JOB_GONE');
   }
   return visitor;
 }

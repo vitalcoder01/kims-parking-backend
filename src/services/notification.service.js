@@ -19,7 +19,11 @@ async function push({ targetRole, targetUserId, title, body, type, data }) {
   const serialized = serializeNotification(notif);
   emitTargeted(targetRole, targetUserId, serialized);
   // Fire-and-forget: FCM latency/failures must never block the API response.
-  pushService.pushToTarget(targetRole, targetUserId, { title, body, type: type || 'info', data }).catch(() => {});
+  // notifId ties this push to the same on-device notification the socket
+  // delta raises, so a phone that receives both shows one, not two.
+  pushService.pushToTarget(targetRole, targetUserId, {
+    title, body, type: type || 'info', notifId: notif.id, data,
+  }).catch(() => {});
 
   return notif;
 }

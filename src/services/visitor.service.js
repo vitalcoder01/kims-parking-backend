@@ -203,7 +203,7 @@ async function assignDriver(visitorId, driverId, valetId) {
 async function acceptTask(visitorId, driverId) {
   const visitor = await prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
   if (!visitor) throw ApiError.notFound('Visitor not found');
-  if (visitor.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this pickup');
+  if (visitor.driverId !== driverId) throw ApiError.conflict('This pickup has already moved on', 'JOB_GONE');
   assertTransition(visitor, ['pending'], 'accept');
   if (visitor.acceptedAt) return visitor;
 
@@ -224,7 +224,7 @@ async function rejectTask(visitorId, driverId) {
   const result = await runSerializable(async (tx) => {
     const visitor = await tx.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
     if (!visitor) throw ApiError.notFound('Visitor not found');
-    if (visitor.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this pickup');
+    if (visitor.driverId !== driverId) throw ApiError.conflict('This pickup has already moved on', 'JOB_GONE');
     assertTransition(visitor, ['pending'], 'reject');
 
     const driverName = visitor.driver?.user?.name ?? 'Driver';
@@ -248,7 +248,7 @@ async function rejectTask(visitorId, driverId) {
 async function markPickedUp(visitorId, driverId) {
   const visitor = await prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
   if (!visitor) throw ApiError.notFound('Visitor not found');
-  if (visitor.driverId !== driverId) throw ApiError.forbidden('You are not the driver assigned to this pickup');
+  if (visitor.driverId !== driverId) throw ApiError.conflict('This pickup has already moved on', 'JOB_GONE');
   assertTransition(visitor, ['pending'], 'mark picked up');
 
   watchdog.disarm('visitor', visitorId);
