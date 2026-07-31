@@ -4,6 +4,7 @@ const notificationService = require('./notification.service');
 const settingService = require('./setting.service');
 const { serializeTask, serializeVisitor } = require('../utils/serialize');
 const ApiError = require('../utils/ApiError');
+const valetRoster = require('./valetRoster');
 
 // Who gets told when a job needs a valet's attention (driver rejected, or
 // never accepted in time).
@@ -141,6 +142,11 @@ async function releaseUnansweredRetrievals() {
     take: 50,
   });
 
+  // Whether there is anyone to hand these to. Read once per sweep rather than
+  // per job — the roster can't change halfway through a loop that takes
+  // milliseconds.
+  const solo = await valetRoster.isSoloValetSite();
+
   for (const task of stalled) {
     // Conditional so two sweep ticks (or two processes) can't both broadcast.
     const released = await prisma.parkingTask.updateMany({
@@ -154,14 +160,32 @@ async function releaseUnansweredRetrievals() {
       include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
     });
 
+    // The record still goes out — recoveryBroadcastAt lifts the ownership
+    // guards, so admins can now step in either way, and the owner's own card
+    // needs to reflect the new state.
+    realtime.emitToRoles(['valet', 'admin'], 'task:upsert', serializeTask(fresh));
+
+    const who = task.doctor?.name ?? 'A doctor';
+    if (solo) {
+      // There is no "original owner unavailable" to report to anyone: the
+      // only valet IS the owner, and telling them someone is unavailable —
+      // or that the first to accept takes it — describes a situation that
+      // doesn't exist. What's actually true is that a car has been waiting,
+      // so that's what gets said, to the one person who can do anything.
+      await notificationService.push({
+        targetRole: `valet:${task.arrivalOwnerValetId}`,
+        targetUserId: task.arrivalOwnerValetId,
+        title: '⏰ Still waiting for a driver',
+        body: `${who} is still waiting for ${task.carNumber}. Please assign a driver.`,
+        type: 'alarm',
+      }).catch(() => {});
+      continue;
+    }
+
     realtime.emitToRoles(['valet', 'admin'], 'task:recovery', {
       task: serializeTask(fresh),
       reason: 'Original owner unavailable',
     });
-    // The card itself now exists for every valet, so send the record too —
-    // it was never emitted to them while it was owner-only.
-    realtime.emitToRoles(['valet', 'admin'], 'task:upsert', serializeTask(fresh));
-
     await notificationService.push({
       targetRole: 'valet',
       title: '🚗 Retrieval needs a valet',
@@ -277,6 +301,11 @@ async function escalateStalledJobs() {
     }),
   ]);
 
+  // Rung 2 is "pull in the rest of the team". With one valet there is no rest
+  // of the team, so it is skipped entirely and the ladder goes straight to
+  // rung 3 (admins) — the only rung that reaches someone new.
+  const solo = await valetRoster.isSoloValetSite();
+
   for (const task of tasks) {
     await prisma.parkingTask.update({
       where: { id: task.id },
@@ -289,37 +318,44 @@ async function escalateStalledJobs() {
         ...(task.type === 'retrieve' && !task.recoveryBroadcastAt ? { recoveryBroadcastAt: new Date() } : {}),
       },
     }).catch(() => {});
-    // Rung 2: the whole valet team.
-    emitTaskReassign(task, task.valet?.name ?? 'A driver', false, 'all');
-    await notificationService.push({
-      targetRole: 'valet',
-      title: '⚠️ Unclaimed job needs a driver',
-      body: `${task.carNumber} still has no driver. Please assign one.`,
-      type: 'alarm',
-    }).catch(() => {});
+    // Rung 2: the whole valet team. driverName is deliberately null — no
+    // driver failed here, the job simply never got one. It used to pass the
+    // VALET's name into a field the prompt renders as the driver, so the
+    // owner was told "Ramesh didn't accept in time" about themselves.
+    if (!solo) {
+      emitTaskReassign(task, null, false, 'all');
+      await notificationService.push({
+        targetRole: 'valet',
+        title: '⚠️ Job still needs a driver',
+        body: `${task.carNumber} still has no driver. Please assign one.`,
+        type: 'alarm',
+      }).catch(() => {});
+    }
     // Rung 3: admins — the real backup when there's only one valet and
     // they're the one who's unreachable.
     await notificationService.push({
       targetRole: 'admin',
       title: '⚠️ Job unattended',
-      body: `${task.carNumber} (${task.doctor?.name ?? 'staff'}) has had no driver since it was raised.`,
+      body: `${task.carNumber} (${task.doctor?.name ?? 'staff'}) still has no driver assigned.`,
       type: 'alarm',
     }).catch(() => {});
   }
 
   for (const visitor of visitors) {
     await prisma.visitor.update({ where: { id: visitor.id }, data: { escalatedAt: new Date() } }).catch(() => {});
-    emitVisitorReassign(visitor, 'A driver', false, 'all');
-    await notificationService.push({
-      targetRole: 'valet',
-      title: '⚠️ Unclaimed pickup needs a driver',
-      body: `${visitor.name}'s car still has no driver. Please assign one.`,
-      type: 'alarm',
-    }).catch(() => {});
+    if (!solo) {
+      emitVisitorReassign(visitor, null, false, 'all');
+      await notificationService.push({
+        targetRole: 'valet',
+        title: '⚠️ Pickup still needs a driver',
+        body: `${visitor.name}'s car still has no driver. Please assign one.`,
+        type: 'alarm',
+      }).catch(() => {});
+    }
     await notificationService.push({
       targetRole: 'admin',
       title: '⚠️ Visitor pickup unattended',
-      body: `${visitor.name}'s pickup has had no driver since it was raised.`,
+      body: `${visitor.name}'s pickup still has no driver assigned.`,
       type: 'alarm',
     }).catch(() => {});
   }

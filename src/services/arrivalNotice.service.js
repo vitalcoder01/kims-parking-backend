@@ -2,6 +2,7 @@ const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
 const realtime = require('../realtime');
 const { serializeArrivalNotice } = require('../utils/serialize');
+const valetRoster = require('./valetRoster');
 
 const include = { doctor: true, ownerValet: true };
 
@@ -22,9 +23,25 @@ async function create({ doctorId, eta }) {
   if (!doctor) throw ApiError.badRequest('doctorId does not reference a valid user');
 
   const existing = await prisma.arrivalNotice.findFirst({ where: { doctorId, fulfilledAt: null } });
+
+  // With exactly one valet on the roster there is no race to hold open, and
+  // making them tap Accept only asks them to tell themselves what they
+  // already know. Ownership is still recorded — the parking session inherits
+  // it exactly as it would have — so this changes who taps, not what is
+  // stored. The moment a second valet exists this stops firing and Accept
+  // becomes a real contest again.
+  const sole = await valetRoster.soleValetId();
+  const preOwned = sole ? { ownerValetId: sole, arrivalAcceptedAt: new Date() } : {};
+
   const notice = existing
-    ? await prisma.arrivalNotice.update({ where: { id: existing.id }, data: { eta, createdAt: new Date() }, include })
-    : await prisma.arrivalNotice.create({ data: { doctorId, eta }, include });
+    ? await prisma.arrivalNotice.update({
+        where: { id: existing.id },
+        // An existing owner is never overwritten — only an unowned notice
+        // picks up the sole valet.
+        data: { eta, createdAt: new Date(), ...(existing.ownerValetId == null ? preOwned : {}) },
+        include,
+      })
+    : await prisma.arrivalNotice.create({ data: { doctorId, eta, ...preOwned }, include });
 
   emitUpsert(notice);
   return notice;

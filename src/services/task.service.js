@@ -346,18 +346,19 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
   // owner's account is gone) it goes to the floor — that's correct, not a
   // fallback: an unowned car still has to be retrieved.
   const owner = task.arrivalOwnerValetId;
+  const who = task.doctor?.name ?? 'A doctor';
   notificationService.push(owner
     ? {
         targetRole: `valet:${owner}`,
         targetUserId: owner,
-        title: '🚗 Your doctor is leaving',
-        body: `${task.doctor?.name ?? 'A doctor'} has requested ${task.carNumber}. Please assign a driver.`,
+        title: '🚗 Car requested — your session',
+        body: `${who} is leaving and needs ${task.carNumber}. Please assign a driver.`,
         type: 'alarm',
       }
     : {
         targetRole: 'valet',
-        title: '🚗 Retrieval requested',
-        body: `${task.doctor?.name ?? 'A doctor'} has requested ${task.carNumber}.`,
+        title: '🚗 Car requested',
+        body: `${who} is leaving and needs ${task.carNumber}. Please assign a driver.`,
         type: 'alarm',
       }).catch(() => {});
 
@@ -844,6 +845,12 @@ async function updateLocation(taskId, lat, lng, driverId) {
     const moved = metersBetween(task.driverLat, task.driverLng, lat, lng);
     const age = Date.now() - (task.locationUpdatedAt?.getTime() ?? 0);
     if (moved < LOCATION_MIN_MOVE_M && age < LOCATION_MAX_STALE_MS) {
+      // NOTE: this is the row as read at the top of this request, and a
+      // transition (mark parked/retrieved) may have committed since. Callers
+      // must treat a location response as authoritative for the position
+      // fields ONLY — never for status. The driver standing at the slot takes
+      // this path on almost every ping, so it is the common case, not a rare
+      // one.
       return task;
     }
   }
