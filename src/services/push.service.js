@@ -97,12 +97,36 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, data 
   const tokens = await prisma.deviceToken.findMany({ where: { userId: { in: userIds } } });
   if (tokens.length === 0) return;
 
+  // A data-only message needs the app's background handler to run in order to
+  // show anything. That is fine while the app is merely backgrounded, but a
+  // swiped-away app is treated as force-stopped by most OEM Androids
+  // (Xiaomi/MIUI, Oppo, Vivo, Realme, Samsung), and force-stopped apps never
+  // receive data-only pushes — so the notification silently never appeared.
+  //
+  // A `notification` block is rendered by the Android system itself, with no
+  // app code running at all, which is the only thing that survives a killed
+  // app. Alarms deliberately stay data-only: they need notifee to raise the
+  // full-screen ringing alarm, and a system-rendered copy alongside it would
+  // just be the same message twice.
+  const isAlarm = type === 'alarm';
   const message = {
     tokens: tokens.map(t => t.token),
     data: { title, body, type, ...(notifId != null ? { notifId: String(notifId) } : {}), ...data },
+    ...(isAlarm ? {} : { notification: { title, body } }),
     android: {
       priority: 'high',
       ttl: 5 * 60 * 1000,
+      ...(isAlarm ? {} : {
+        notification: {
+          // Without this the app manifest's default channel applies, which is
+          // the loud ring channel — a doctor's "Car Parked" would ring like a
+          // job alarm.
+          channelId: 'kims_parking',
+          // Same identity the in-app path uses, so a repeat delivery replaces
+          // the entry instead of stacking a second one.
+          ...(notifId != null ? { tag: `kims-notif-${notifId}` } : {}),
+        },
+      }),
     },
   };
 
