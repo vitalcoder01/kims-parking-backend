@@ -87,6 +87,47 @@ function isVisibleToValet(task, valetId) {
   return isRetrievalOpenToAll(task);
 }
 
+/**
+ * Keep the Visitor row in step with its ParkingTask.
+ *
+ * Visitors run through the same task machinery as staff, but the tracking
+ * page, the valet's visitor list and the WhatsApp /status reply all read
+ * Visitor — so the task is the source of truth and this projects it across.
+ * One direction only: nothing writes back from Visitor to the task.
+ *
+ * Called after a transition rather than inside it, so a mirroring failure can
+ * never roll back the real work the driver just did.
+ */
+async function syncVisitorFromTask(task) {
+  if (!task?.visitorId) return;
+
+  const data = {};
+  if (task.type === 'park') {
+    // The key changing hands is the visitor's "picked up" moment — staff have
+    // a separate key-collection step, visitors don't.
+    if (task.keyCollectedAt) data.pickedUpAt = task.keyCollectedAt;
+    if (task.driverId != null) data.driverId = task.driverId;
+    if (task.acceptedAt) data.acceptedAt = task.acceptedAt;
+    if (task.status === 'completed') {
+      data.status = 'parked';
+      data.slotId = task.slotId;
+      data.trackingProgress = 1;
+    }
+  } else if (task.type === 'retrieve') {
+    if (task.driverId != null) data.driverId = task.driverId;
+    if (task.status === 'delivered') data.status = 'delivered';
+    if (task.status === 'completed') data.status = 'retrieved';
+  }
+
+  if (Object.keys(data).length === 0) return;
+  await prisma.visitor.update({ where: { id: task.visitorId }, data })
+    .then(v => {
+      cache.invalidate('visitors:');
+      realtime.emitAll('visitor:upsert', require('../utils/serialize').serializeVisitor(v));
+    })
+    .catch(() => { /* the task is what matters; the mirror is a view */ });
+}
+
 // A completed task is immutable, and every other transition only makes sense
 // from one specific prior state — without this, e.g. re-firing key-collected
 // on an already-completed task flips its status back while leaving
@@ -685,6 +726,7 @@ async function acceptTask(taskId, driverId) {
   watchdog.disarm('task', taskId);
   cache.invalidate('tasks:');
   emitTask(task);
+  syncVisitorFromTask(task).catch(() => {});
   return task;
 }
 
@@ -747,6 +789,7 @@ async function markKeyCollected(taskId) {
   // Key handed over means the assignment is definitively taken.
   watchdog.disarm('task', taskId);
   emitTask(updated);
+  syncVisitorFromTask(updated).catch(() => {});
   return updated;
 }
 
@@ -781,6 +824,7 @@ async function markInTransit(taskId, driverId) {
   cache.invalidate('tasks:');
   watchdog.disarm('task', taskId);
   emitTask(updated);
+  syncVisitorFromTask(updated).catch(() => {});
   return updated;
 }
 
@@ -840,6 +884,7 @@ async function markParked(taskId, slotId, driverId) {
   emitTask(task);
   emitSlot(slot);
   if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
+  syncVisitorFromTask(task).catch(() => {});
   return task;
 }
 
@@ -892,6 +937,7 @@ async function markRetrieved(taskId, driverId) {
   emitTask(task);
   if (slot) emitSlot(slot);
   if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
+  syncVisitorFromTask(task).catch(() => {});
 
   // The one moment in a retrieval that the doctor actually has to act on:
   // their car is downstairs. Everything earlier in the journey (a valet took
@@ -942,6 +988,7 @@ async function confirmDelivered(taskId) {
   });
   cache.invalidate('tasks:');
   emitTask(updated);
+  syncVisitorFromTask(updated).catch(() => {});
   return updated;
 }
 
@@ -1210,6 +1257,7 @@ async function markReturned(taskId, driverId) {
 }
 
 module.exports = {
+  syncVisitorFromTask,
   ownerLabel,
   isVisibleToValet,
   isRetrievalScheduled,

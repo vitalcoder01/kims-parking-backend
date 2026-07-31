@@ -7,6 +7,10 @@ const notificationService = require('./notification.service');
 const assignLocks = require('./assignLocks');
 const jobAlerts = require('./jobAlerts');
 const runSerializable = require('../utils/runSerializable');
+
+// Lazy: task.service requires this module too, so a top-level require would
+// be circular and one side would see an empty object.
+function taskService() { return require('./task.service'); }
 const whatsapp = require('./whatsapp.service');
 const { serializeVisitor, serializeSlot } = require('../utils/serialize');
 
@@ -256,6 +260,27 @@ async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) 
     },
     include: visitorInclude,
   });
+  // The visitor's parking job is a real ParkingTask, exactly like a staff
+  // member's. That is what puts it on the driver's normal job card with the
+  // normal actions, instead of a separate "visitor pickup" shape that had to
+  // be rendered and handled on its own everywhere.
+  //
+  // Created here, unassigned, mirroring createTask for staff: the valet then
+  // picks a driver through the same assignDriver call.
+  await prisma.parkingTask.create({
+    data: {
+      type: 'park',
+      visitorId: visitor.id,
+      carNumber: visitor.carNumber ?? '',
+      status: 'assigned',
+      assignedAt: new Date(),
+      isCurrent: true,
+      valetId: valetId ?? null,
+      valetClaimedAt: valetId ? new Date() : null,
+    },
+  }).catch(() => { /* a missing task must not fail the check-in */ });
+
+  cache.invalidate('tasks:');
   cache.invalidate('visitors:');
   emitVisitor(visitor);
 
@@ -287,91 +312,36 @@ async function updateVisitor(id, patch) {
 // Valet: assigns an available driver to collect the key and park this
 // visitor's car. Starts the accept countdown — the driver must confirm on
 // their phone or the valet is prompted to reassign.
+// Valet: put a driver on a visitor's parking job.
+//
+// Delegates to taskService.assignDriver — the same call the staff flow makes.
+// The locking, the driver-availability check, the accept watchdog, the
+// "one job one valet" claim and the driver's push notification are all that
+// function's, not reimplemented here. This only finds the visitor's task.
 async function assignDriver(visitorId, driverId, valetId) {
-  // Locks the pickup AND the driver, in the same shared registry
-  // task.service.js uses — otherwise a parking task and a visitor pickup
-  // could each claim this same driver at the same moment (separate locks
-  // and separate ids meant neither one saw the other).
-  return assignLocks.withLocks(
-    [assignLocks.visitorKey(visitorId), assignLocks.driverKey(driverId)],
-    'This pickup or driver is already being assigned',
-    async () => {
-      let previousDriverId = null;
-      // Serializable, matching the task-side assign: at Read Committed two
-      // concurrent assigns could both read this driver as available.
-      const visitor = await runSerializable(async (tx) => {
-        const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
-        if (!existing) throw ApiError.notFound('Visitor not found');
-        assertTransition(existing, ['pending'], 'assign a driver');
+  const visitor = await prisma.visitor.findUnique({ where: { id: visitorId } });
+  if (!visitor) throw ApiError.notFound('Visitor not found');
+  assertTransition(visitor, ['pending'], 'assign a driver');
 
-        // Same rule as parking tasks: once a driver has accepted, the job is
-        // theirs until it's explicitly cancelled — no silent handovers.
-        if (existing.acceptedAt && existing.driverId && existing.driverId !== driverId) {
-          throw ApiError.conflict('That driver has already accepted this pickup — cancel it first to reassign', 'JOB_GONE');
-        }
+  const task = await prisma.parkingTask.findFirst({
+    where: { visitorId, type: 'park', isCurrent: true },
+  });
+  if (!task) throw ApiError.conflict('This visitor has no parking job to assign', 'JOB_GONE');
 
-        // One pickup, one valet — see task.service.js assignDriver for why
-        // this lifts once the job has escalated rather than being permanent.
-        if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt) {
-          const owner = await tx.user.findUnique({ where: { id: existing.valetId }, select: { name: true } });
-          throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this pickup`, 'JOB_GONE');
-        }
+  await taskService().assignDriver(task.id, driverId, null, valetId);
 
-        const driver = await tx.driver.findUnique({ where: { id: driverId } });
-        if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-        if (driver.status !== 'available') throw ApiError.conflict('Driver is not available', 'DRIVER_BUSY');
-
-        // Acting on the job re-stamps the claim and clears any escalation,
-        // so the stall clock restarts instead of it still reading unattended.
-        // Ownership follows whoever acts — see task.service.js assignDriver.
-        const ownership = {
-          ...(valetId ? { valetId } : {}),
-          valetClaimedAt: new Date(),
-          escalatedAt: null,
-        };
-
-        const updated = await tx.visitor.update({
-          where: { id: visitorId },
-          data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25, ...ownership },
-          include: visitorInclude,
-        });
-
-        await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
-
-        // Same fix as task.service.js's assignDriver: reassigning away from
-        // whoever had this before their accept/reject ever ran must free them
-        // too, or they're stuck 'busy' forever on a job that's no longer theirs.
-        if (existing.driverId && existing.driverId !== driverId) {
-          const oldDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
-          if (oldDriver?.currentTaskId === visitorId) {
-            await tx.driver.update({ where: { id: existing.driverId }, data: { status: 'available', currentTaskId: null } });
-            previousDriverId = existing.driverId;
-          }
-        }
-
-        return updated;
-      });
-      cache.invalidate('visitors:');
-      cache.invalidate('drivers:');
-      emitVisitor(visitor);
-      emitDriverPatch(driverId, 'busy', visitorId);
-      if (previousDriverId) emitDriverPatch(previousDriverId, 'available', null);
-      // Server-side alert, same reasoning as the task-side assign: a valet
-      // whose phone dies right after this call must not leave a live
-      // assignment the driver was never told about.
-      notificationService.push({
-        targetRole: `driver:${driverId}`,
-        title: '🔔 Visitor Car Pickup!',
-        body: `Collect key from valet for ${visitor.name}'s car (${visitor.carNumber ?? 'no plate'}).`,
-        type: 'alarm',
-      }).catch(() => {});
-      await watchdog.arm('visitor', visitorId, driverId);
-      return visitor;
-    },
-  );
+  // The task is the source of truth; this keeps the visitor row readable for
+  // the tracking page and the valet's visitor list.
+  const updated = await prisma.visitor.update({
+    where: { id: visitorId },
+    data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25 },
+    include: visitorInclude,
+  });
+  cache.invalidate('visitors:');
+  emitVisitor(updated);
+  return updated;
 }
 
-// Driver: accepted the pickup — stops the accept countdown.
 async function acceptTask(visitorId, driverId) {
   const visitor = await prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
   if (!visitor) throw ApiError.notFound('Visitor not found');
