@@ -247,24 +247,21 @@ async function createTask({ type, doctorId, carNumber, slotId, valetId }) {
   // This doctor's key just actually changed hands — any "I'm on my way"
   // notice they announced earlier is done, whether or not they ever sent
   // one (a no-op if there wasn't one).
+  // Session ownership is deliberately NOT set here. Accepting the arrival
+  // broadcast only means "I'll walk out and meet them" — it says nothing
+  // about who ends up running the job, because the accepter can be busy,
+  // on a break, or simply not the one the doctor walks up to. Ownership is
+  // established when a driver is assigned (see assignDriver), by whoever
+  // actually does it.
+  //
+  // Taking ownership from the accepter here is what let a valet who accepted
+  // an arrival lock out the valet who was physically holding the key: the
+  // key-taker created the job, ownership jumped to the accepter, and the
+  // key-taker was then refused with "X is handling this job".
   if (created) {
-    // The parking session inherits whoever accepted the arrival. If the
-    // doctor never sent an arrival notice (walked straight up to the
-    // counter), the valet taking the key becomes the arrival owner instead.
-    const notice = await arrivalNoticeService.fulfillForDoctor(doctorId).catch(() => null);
-    const arrivalOwner = notice?.ownerValetId ?? valetId ?? null;
-    if (arrivalOwner) {
-      await prisma.parkingTask.update({
-        where: { id: task.id },
-        data: {
-          arrivalOwnerValetId: arrivalOwner,
-          arrivalAcceptedAt: notice?.arrivalAcceptedAt ?? new Date(),
-          valetId: arrivalOwner,
-        },
-      }).catch(() => {});
-      task.arrivalOwnerValetId = arrivalOwner;
-      task.valetId = arrivalOwner;
-    }
+    // The key has actually changed hands, so any "I'm on my way" notice this
+    // doctor announced is done (a no-op if there wasn't one).
+    await arrivalNoticeService.fulfillForDoctor(doctorId).catch(() => null);
   }
 
   return { task, created };
@@ -473,6 +470,13 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
           ...(valetId ? { valetId } : {}),
           valetClaimedAt: new Date(),
           escalatedAt: null,
+          // THIS is where a parking session gets its owner: whoever dispatches
+          // the driver. Write-once — a later reassignment moves the
+          // operational claim (valetId) but never rewrites who owns the
+          // session, so the record of who ran this doctor's arrival survives.
+          ...(valetId && existing.type === 'park' && existing.arrivalOwnerValetId == null
+            ? { arrivalOwnerValetId: valetId, arrivalAcceptedAt: new Date() }
+            : {}),
         };
 
         const updated = await tx.parkingTask.update({

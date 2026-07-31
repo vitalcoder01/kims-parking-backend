@@ -140,11 +140,15 @@ model ParkingTask {
   escalatedAt       DateTime?
 
   // ── Parking session ownership ────────────────────────────────────────
-  // arrivalOwner is the valet who accepted the doctor's arrival and owns the
-  // session end to end. It is written once and NEVER overwritten, so the
-  // history survives even when a retrieval is recovered by someone else.
+  // arrivalOwner is the valet who DISPATCHED THE DRIVER for this doctor's
+  // arrival, and owns the session end to end from there. Not whoever accepted
+  // the arrival broadcast: accepting only means "I'll meet them", and the
+  // accepter is regularly not the person the doctor actually walks up to.
+  // Written once and NEVER overwritten, so the history survives both a later
+  // reassignment and a retrieval recovered by someone else.
   arrivalOwnerValetId Int?
   arrivalOwnerValet   User?      @relation("ValetArrivalOwned", fields: [arrivalOwnerValetId], references: [id])
+  // When that dispatch happened — i.e. when the session gained its owner.
   arrivalAcceptedAt   DateTime?
   // retrievalOwner is whoever is actually running the departure leg. Equal to
   // arrivalOwner in the normal case; different only when the owner didn't
@@ -266,10 +270,14 @@ model ArrivalNotice {
   eta         Int
   createdAt   DateTime  @default(now())
   fulfilledAt DateTime?
-  // The valet who accepted this arrival. Null while it is still broadcast to
-  // every available valet; set exactly once, by whoever accepts first. The
-  // write is guarded by `WHERE ownerValetId IS NULL` so the database — not
-  // frontend timing — decides the winner.
+  // The valet who accepted this arrival — "I'll walk out and meet them", so
+  // the rest of the team stops watching for this doctor. Deliberately NOT
+  // session ownership: that is decided later, by whoever dispatches the
+  // driver (see ParkingTask.arrivalOwnerValetId), because an accepter can be
+  // busy by the time the doctor actually turns up.
+  // Null while still broadcast to every valet; set exactly once, by whoever
+  // accepts first. Guarded by `WHERE ownerValetId IS NULL` so the database —
+  // not frontend timing — decides the winner.
   ownerValetId   Int?
   ownerValet     User?     @relation("ValetArrivals", fields: [ownerValetId], references: [id])
   arrivalAcceptedAt DateTime?
