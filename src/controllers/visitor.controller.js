@@ -137,7 +137,7 @@ const park = asyncHandler(async (req, res) => {
 const assignRetrievalDriver = asyncHandler(async (req, res) => {
   const { driverId } = req.body;
   if (!driverId) throw ApiError.badRequest('driverId is required');
-  const visitor = await visitorService.assignRetrievalDriver(parseId(req.params.id), parseId(driverId));
+  const visitor = await visitorService.assignRetrievalDriver(parseId(req.params.id), parseId(driverId), req.user.id);
   res.json({ visitor: serializeVisitor(visitor) });
 });
 

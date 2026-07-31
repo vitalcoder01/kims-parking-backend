@@ -33,10 +33,32 @@ function generateToken() {
 // task.service.js's helper of the same name. Blanking currentTaskId
 // unconditionally would mark a driver free while they're genuinely out on
 // a newer job they'd since been assigned.
-async function freeDriverIfStillOn(tx, driverId, jobId) {
+// Frees a driver only if they're still on THIS visitor's job.
+//
+// `Driver.currentTaskId` holds a ParkingTask id. It used to hold a visitor id
+// on these paths, which was survivable while visitors had their own flow —
+// but now that visitors run on ParkingTask, the two id spaces overlap and a
+// visitor id can silently match an unrelated task. Anand Raj sat "busy" on
+// currentTaskId=54 pointing at a task that does not exist, because 54 was a
+// VISITOR id; nothing could ever free him.
+//
+// So the visitor's own task id is resolved first, and the comparison is made
+// against that.
+async function freeDriverIfStillOn(tx, driverId, visitorId) {
   if (!driverId) return false;
   const driver = await tx.driver.findUnique({ where: { id: driverId } });
-  if (driver && driver.currentTaskId != null && driver.currentTaskId !== jobId) return false;
+  if (!driver) return false;
+
+  if (driver.currentTaskId != null) {
+    const task = await tx.parkingTask.findFirst({
+      where: { visitorId, id: driver.currentTaskId },
+      select: { id: true },
+    });
+    // Pointing at something that isn't this visitor's task means they have
+    // genuinely moved on to another job — leave them on it.
+    if (!task) return false;
+  }
+
   await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
   return true;
 }
@@ -524,56 +546,46 @@ async function requestRetrieval(visitorIdOrToken) {
 // `driverId` on Visitor is reused from the park leg and isn't cleared until
 // the retrieval completes, so the driver's own currentTaskId is what
 // disambiguates "actively out on this retrieval right now".
-async function assignRetrievalDriver(visitorId, driverId) {
-  // This path had no lock at all — only the pickup-side assign did, so a
-  // double-tap here went straight through.
-  return assignLocks.withLocks(
-    [assignLocks.visitorKey(visitorId), assignLocks.driverKey(driverId)],
-    'This retrieval or driver is already being assigned',
-    () => assignRetrievalDriverLocked(visitorId, driverId),
-  );
-}
+// Valet: put a driver on a visitor's RETRIEVAL.
+//
+// The missing half of the unification. The parking leg already ran through
+// ParkingTask, but this one still moved the Visitor row on its own — so the
+// valet's list said "Anand Raj en route" while Anand's own app showed no job
+// at all, because no task existed for him to see.
+//
+// Now it raises the retrieval through taskService (creating the task if the
+// valet is acting before one exists) and then assigns through the same
+// assignDriver every other job uses.
+async function assignRetrievalDriver(visitorId, driverId, valetId) {
+  const visitor = await prisma.visitor.findUnique({ where: { id: visitorId } });
+  if (!visitor) throw ApiError.notFound('Visitor not found');
+  assertTransition(visitor, ['parked'], 'assign a retrieval driver');
 
-async function assignRetrievalDriverLocked(visitorId, driverId) {
-  const visitor = await runSerializable(async (tx) => {
-    const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
-    if (!existing) throw ApiError.notFound('Visitor not found');
-    assertTransition(existing, ['parked'], 'assign a retrieval driver');
+  let task = await prisma.parkingTask.findFirst({
+    where: { visitorId, type: 'retrieve', status: { notIn: ['completed', 'cancelled'] } },
+    orderBy: { createdAt: 'desc' },
+  });
 
-    if (existing.driverId) {
-      const currentDriver = await tx.driver.findUnique({ where: { id: existing.driverId } });
-      if (currentDriver?.status === 'busy' && currentDriver.currentTaskId === visitorId) {
-        throw ApiError.conflict('A driver is already assigned to retrieve this car');
-      }
-    }
+  // The valet is at the desk with the visitor in front of them, so pressing
+  // "retrieve" IS the request — no separate step, and "now" is the honest
+  // planned departure.
+  if (!task) {
+    task = await taskService().requestRetrieval({ visitorId, plannedDepartureMinutes: 0 });
+  }
 
-    const driver = await tx.driver.findUnique({ where: { id: driverId } });
-    if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-    if (driver.status !== 'available') throw ApiError.conflict('Driver is not available', 'DRIVER_BUSY');
+  await taskService().assignDriver(task.id, driverId, null, valetId);
 
-    await tx.driver.update({ where: { id: driverId }, data: { status: 'busy', currentTaskId: visitorId } });
-
-    return tx.visitor.update({
-      where: { id: visitorId },
-      data: { driverId, retrievalRequested: true, trackingProgress: 0.85 },
-      include: visitorInclude,
-    });
+  const updated = await prisma.visitor.update({
+    where: { id: visitorId },
+    data: { driverId, retrievalRequested: true, trackingProgress: 0.85 },
+    include: visitorInclude,
   });
   cache.invalidate('visitors:');
-  cache.invalidate('drivers:');
-  emitVisitor(visitor);
-  emitDriverPatch(driverId, 'busy', visitorId);
-  notificationService.push({
-    targetRole: `driver:${driverId}`,
-    title: '🔔 Visitor Retrieval!',
-    body: `Bring ${visitor.carNumber ?? 'the car'} from slot ${visitor.slotId ?? ''} back for ${visitor.name}.`,
-    type: 'alarm',
-  }).catch(() => {});
-  return visitor;
+  cache.invalidate('tasks:');
+  emitVisitor(updated);
+  return updated;
 }
 
-// Driver: car handed back to the visitor at the valet counter — frees the
-// slot and the driver, closes out the visit.
 async function markRetrieved(visitorId) {
   const { visitor, slot } = await runSerializable(async (tx) => {
     const existing = await tx.visitor.findUnique({ where: { id: visitorId } });

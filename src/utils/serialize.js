@@ -17,7 +17,11 @@ function serializeTask(task) {
     // One label for "whose car is this", whether the owner is a staff member
     // or a visitor. The valet's queue and inbox render this field and should
     // not have to know which kind of session they are looking at.
-    doctorName: task.doctor?.name ?? task.visitor?.name ?? undefined,
+    // Trim-then-|| , not ??: a visitor may check in with NO name (it is
+    // optional), and '' passes straight through ?? — which rendered the
+    // driver's card as "AP 04 AR 2343 · " with nothing after the separator.
+    doctorName: (task.doctor?.name ?? task.visitor?.name ?? '').trim()
+      || (task.visitorId != null ? 'Visitor' : undefined),
     visitorId: task.visitorId ?? undefined,
     // Lets the UI say "Visitor" where it matters (e.g. no department to show)
     // without inferring it from a missing doctorId.
