@@ -29,6 +29,9 @@ model User {
   parkedSlots         ParkingSlot[]  @relation("SlotDoctor")
   tasksAsDoctor       ParkingTask[]  @relation("DoctorTasks")
   tasksAsValet        ParkingTask[]  @relation("ValetTasks")
+  arrivalsAccepted    ArrivalNotice[] @relation("ValetArrivals")
+  sessionsOwned       ParkingTask[]  @relation("ValetArrivalOwned")
+  retrievalsOwned     ParkingTask[]  @relation("ValetRetrievalOwned")
   visitorsAsValet     Visitor[]      @relation("ValetVisitors")
   deviceTokens        DeviceToken[]
   arrivalNotices      ArrivalNotice[]
@@ -135,6 +138,28 @@ model ParkingTask {
   // Set once this job has been escalated past its owner, so the escalation
   // only ever fires once per stall rather than on every sweep.
   escalatedAt       DateTime?
+
+  // ── Parking session ownership ────────────────────────────────────────
+  // arrivalOwner is the valet who accepted the doctor's arrival and owns the
+  // session end to end. It is written once and NEVER overwritten, so the
+  // history survives even when a retrieval is recovered by someone else.
+  arrivalOwnerValetId Int?
+  arrivalOwnerValet   User?      @relation("ValetArrivalOwned", fields: [arrivalOwnerValetId], references: [id])
+  arrivalAcceptedAt   DateTime?
+  // retrievalOwner is whoever is actually running the departure leg. Equal to
+  // arrivalOwner in the normal case; different only when the owner didn't
+  // respond in time and another valet claimed the recovery.
+  retrievalOwnerValetId Int?
+  retrievalOwnerValet   User?    @relation("ValetRetrievalOwned", fields: [retrievalOwnerValetId], references: [id])
+  retrievalAcceptedAt   DateTime?
+  // OWNER | RECOVERY — how the retrieval owner came to hold it.
+  retrievalOwnershipSource String?
+  // When the owner-only response window opened. Null once claimed, or once
+  // recovery has already broadcast it.
+  ownerNotifiedAt     DateTime?
+  // Set when the owner's window lapsed and the request went out to everyone.
+  recoveryBroadcastAt DateTime?
+
   occupyingSlot     ParkingSlot? @relation("CurrentSlotTask")
   doctor            User         @relation("DoctorTasks", fields: [doctorId], references: [id])
   driver            Driver?      @relation("DriverTasks", fields: [driverId], references: [id])
@@ -241,9 +266,17 @@ model ArrivalNotice {
   eta         Int
   createdAt   DateTime  @default(now())
   fulfilledAt DateTime?
+  // The valet who accepted this arrival. Null while it is still broadcast to
+  // every available valet; set exactly once, by whoever accepts first. The
+  // write is guarded by `WHERE ownerValetId IS NULL` so the database — not
+  // frontend timing — decides the winner.
+  ownerValetId   Int?
+  ownerValet     User?     @relation("ValetArrivals", fields: [ownerValetId], references: [id])
+  arrivalAcceptedAt DateTime?
 
   @@index([doctorId])
   @@index([fulfilledAt])
+  @@index([ownerValetId])
   @@map("arrival_notices")
 }
 
@@ -280,6 +313,10 @@ enum TaskType {
 }
 
 enum TaskStatus {
+  // Retrieve tasks only: a valet has taken ownership of the departure but
+  // hasn't picked a driver yet. Distinct from `requested` (nobody has it) so
+  // the queue can show "someone is on this" without inventing a driver.
+  accepted
   assigned
   key_collected
   in_transit

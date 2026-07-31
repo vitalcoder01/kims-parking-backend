@@ -108,7 +108,7 @@ async function fireTaskTimeout(taskId, driverId) {
       // stay 'assigned' with no driver ("Waiting for driver").
       // acceptedAt cleared too: a rolled-back assignment must leave no trace
       // of an acceptance, or the next assign/accept reasons about a stale one.
-      data: { driverId: null, acceptedAt: null, ...(task.type === 'retrieve' && { status: 'requested' }) },
+      data: { driverId: null, acceptedAt: null, ...(task.type === 'retrieve' && { status: task.retrievalOwnerValetId ? 'accepted' : 'requested' }) },
       include: taskInclude,
     });
     await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });

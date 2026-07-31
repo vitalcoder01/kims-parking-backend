@@ -3,6 +3,7 @@ const realtime = require('../realtime');
 const notificationService = require('./notification.service');
 const settingService = require('./setting.service');
 const { serializeTask, serializeVisitor } = require('../utils/serialize');
+const ApiError = require('../utils/ApiError');
 
 // Who gets told when a job needs a valet's attention (driver rejected, or
 // never accepted in time).
@@ -112,6 +113,131 @@ async function alertVisitorNeedsDriver(visitor, driverName, { rejected = false }
 const SWEEP_INTERVAL_MS = 30 * 1000;
 let sweepTimer = null;
 
+// Departure requests whose owner never responded. Their session owner was
+// alarmed alone (that's the point of ownership) — but an owner who is on a
+// break, off shift, or simply not looking at their phone cannot be allowed to
+// hold a doctor's car hostage. After a configurable window the request goes
+// back out to every available valet, tagged with why.
+//
+// The original arrivalOwnerValetId is deliberately left untouched: the record
+// of who took that car in is history, not a routing field.
+async function releaseUnansweredRetrievals() {
+  const cutoff = new Date(Date.now() - await settingService.getOwnerResponseWindowMs());
+
+  const stalled = await prisma.parkingTask.findMany({
+    where: {
+      type: 'retrieve',
+      status: 'requested',
+      isCurrent: true,
+      driverId: null,
+      arrivalOwnerValetId: { not: null },
+      // Nobody has claimed the retrieval itself — an owner who accepted is
+      // responding, and an owner who assigned a driver has driverId set.
+      retrievalOwnerValetId: null,
+      recoveryBroadcastAt: null,
+      ownerNotifiedAt: { lt: cutoff },
+    },
+    include: { doctor: true, arrivalOwnerValet: true },
+    take: 50,
+  });
+
+  for (const task of stalled) {
+    // Conditional so two sweep ticks (or two processes) can't both broadcast.
+    const released = await prisma.parkingTask.updateMany({
+      where: { id: task.id, recoveryBroadcastAt: null, retrievalOwnerValetId: null },
+      data: { recoveryBroadcastAt: new Date() },
+    });
+    if (released.count === 0) continue;
+
+    const fresh = await prisma.parkingTask.findUnique({
+      where: { id: task.id },
+      include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+    });
+
+    realtime.emitToRoles(['valet', 'admin'], 'task:recovery', {
+      task: serializeTask(fresh),
+      reason: 'Original owner unavailable',
+    });
+    // The card itself now exists for every valet, so send the record too —
+    // it was never emitted to them while it was owner-only.
+    realtime.emitToRoles(['valet', 'admin'], 'task:upsert', serializeTask(fresh));
+
+    await notificationService.push({
+      targetRole: 'valet',
+      title: '🚗 Retrieval needs a valet',
+      body: `${task.carNumber} — original owner unavailable. First to accept takes it.`,
+      type: 'alarm',
+    }).catch(() => {});
+  }
+
+  return stalled.length;
+}
+
+// First valet to accept a released retrieval takes it. Same WHERE-clause
+// guard as arrival accept: the loser's UPDATE matches zero rows, so the
+// database decides, not whose tap reached the server on a faster network.
+async function claimRetrieval(taskId, valetId) {
+  const claimed = await prisma.parkingTask.updateMany({
+    where: {
+      id: taskId,
+      type: 'retrieve',
+      // 'accepted' too: a retrieval whose driver assignment was rolled back
+      // sits there, and if its holder then goes quiet it must still be
+      // claimable by whoever picks it up.
+      status: { in: ['requested', 'accepted'] },
+      // Claimable when nobody holds it, or when whoever did hold it has
+      // already been escalated past.
+      OR: [
+        { retrievalOwnerValetId: null, recoveryBroadcastAt: { not: null } },
+        { retrievalOwnerValetId: null, arrivalOwnerValetId: valetId },
+        { escalatedAt: { not: null } },
+      ],
+    },
+    data: {
+      retrievalOwnerValetId: valetId,
+      retrievalAcceptedAt: new Date(),
+      // RECOVERY only when they are NOT the original owner — an owner
+      // answering inside their own window is the normal path, not a recovery.
+      valetId,
+      valetClaimedAt: new Date(),
+      escalatedAt: null,
+      status: 'accepted',
+    },
+  });
+
+  const task = await prisma.parkingTask.findUnique({
+    where: { id: taskId },
+    include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+  });
+  if (!task) throw ApiError.notFound('Retrieval request not found');
+
+  if (claimed.count === 0) {
+    if (task.retrievalOwnerValetId && task.retrievalOwnerValetId !== valetId) {
+      throw ApiError.conflict('This retrieval request has already been accepted.', 'ALREADY_ACCEPTED');
+    }
+    if (task.retrievalOwnerValetId !== valetId) {
+      throw ApiError.conflict('This retrieval request is no longer available.', 'JOB_GONE');
+    }
+    return task; // idempotent re-accept by the same valet
+  }
+
+  // Source is derived from who won, and written after the claim so it can't
+  // race with the claim itself.
+  const source = task.arrivalOwnerValetId === valetId ? 'OWNER' : 'RECOVERY';
+  const withSource = await prisma.parkingTask.update({
+    where: { id: taskId },
+    data: { retrievalOwnershipSource: source },
+    include: { doctor: true, driver: { include: { user: true } }, valet: true, arrivalOwnerValet: true, retrievalOwnerValet: true },
+  });
+
+  const payload = serializeTask(withSource);
+  realtime.emitToRoles(['doctor', 'staff', 'driver', 'admin'], 'task:upsert', payload);
+  realtime.emitToUser(valetId, 'task:upsert', payload);
+  // Everyone who saw the recovery broadcast loses the action now.
+  realtime.emitToRoles(['valet'], 'task:restrict', { id: taskId, ownerValetId: valetId });
+  return withSource;
+}
+
 async function escalateStalledJobs() {
   const graceMs = await ownerGraceMs();
   const cutoff = new Date(Date.now() - graceMs);
@@ -121,11 +247,19 @@ async function escalateStalledJobs() {
   const [tasks, visitors] = await Promise.all([
     prisma.parkingTask.findMany({
       where: {
-        status: { in: ['requested', 'assigned'] },
+        status: { in: ['requested', 'accepted', 'assigned'] },
         driverId: null,
         valetId: { not: null },
         escalatedAt: null,
         valetClaimedAt: { lt: cutoff },
+        // A departure still inside its owner's private window belongs to the
+        // recovery pass below, not to this one — otherwise both would fire and
+        // the team would be pulled in twice for the same car.
+        NOT: {
+          type: 'retrieve',
+          retrievalOwnerValetId: null,
+          recoveryBroadcastAt: null,
+        },
       },
       include: { doctor: true, driver: { include: { user: true } }, valet: true },
       take: 50,
@@ -144,7 +278,17 @@ async function escalateStalledJobs() {
   ]);
 
   for (const task of tasks) {
-    await prisma.parkingTask.update({ where: { id: task.id }, data: { escalatedAt: new Date() } }).catch(() => {});
+    await prisma.parkingTask.update({
+      where: { id: task.id },
+      data: {
+        escalatedAt: new Date(),
+        // A retrieval escalating past its holder is the same event as an
+        // unanswered one being released: it has to become visible to the
+        // valets we're about to alarm, or they get a notification for a card
+        // that isn't on their screen.
+        ...(task.type === 'retrieve' && !task.recoveryBroadcastAt ? { recoveryBroadcastAt: new Date() } : {}),
+      },
+    }).catch(() => {});
     // Rung 2: the whole valet team.
     emitTaskReassign(task, task.valet?.name ?? 'A driver', false, 'all');
     await notificationService.push({
@@ -180,7 +324,13 @@ async function escalateStalledJobs() {
     }).catch(() => {});
   }
 
-  return tasks.length + visitors.length;
+  const released = await releaseUnansweredRetrievals().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn('[jobAlerts] retrieval release failed:', err.message);
+    return 0;
+  });
+
+  return tasks.length + visitors.length + released;
 }
 
 function startEscalationSweep() {
@@ -201,6 +351,8 @@ function stopEscalationSweep() {
 
 module.exports = {
   touchOwnerWindow,
+  releaseUnansweredRetrievals,
+  claimRetrieval,
   alertTaskNeedsDriver,
   alertVisitorNeedsDriver,
   escalateStalledJobs,

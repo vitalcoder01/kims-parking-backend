@@ -11,6 +11,13 @@ const create = asyncHandler(async (req, res) => {
   res.status(201).json({ arrival: serializeArrivalNotice(notice) });
 });
 
+// Valet: "Accept" on a broadcast arrival request. Whoever lands here first
+// owns the resulting parking session; everyone else gets the conflict.
+const accept = asyncHandler(async (req, res) => {
+  const notice = await svc.accept(parseId(req.params.id), req.user.id);
+  res.json({ arrival: serializeArrivalNotice(notice) });
+});
+
 const list = asyncHandler(async (req, res) => {
   const notices = await svc.listActive();
   res.json({ arrivals: notices.map(serializeArrivalNotice) });
@@ -21,4 +28,4 @@ const dismiss = asyncHandler(async (req, res) => {
   res.json({ arrival: serializeArrivalNotice(notice) });
 });
 
-module.exports = { create, list, dismiss };
+module.exports = { create, list, accept, dismiss };

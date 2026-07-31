@@ -22,6 +22,21 @@ function serializeTask(task) {
     valetId: task.valetId ?? undefined,
     valetName: task.valet?.name,
     escalatedAt: task.escalatedAt ?? undefined,
+    // Session ownership. arrivalOwner is written once and never overwritten —
+    // it's the audit trail of who took the car in. retrievalOwner is separate
+    // so a recovery hand-off doesn't erase that history.
+    arrivalOwnerValetId: task.arrivalOwnerValetId ?? undefined,
+    arrivalOwnerValetName: task.arrivalOwnerValet?.name,
+    arrivalAcceptedAt: task.arrivalAcceptedAt ?? undefined,
+    retrievalOwnerValetId: task.retrievalOwnerValetId ?? undefined,
+    retrievalOwnerValetName: task.retrievalOwnerValet?.name,
+    retrievalAcceptedAt: task.retrievalAcceptedAt ?? undefined,
+    retrievalOwnershipSource: task.retrievalOwnershipSource ?? undefined,
+    ownerNotifiedAt: task.ownerNotifiedAt ?? undefined,
+    // Set when the owner's response window lapsed and the request went back
+    // out to everyone — the frontend shows the "Original owner unavailable"
+    // reason off this.
+    recoveryBroadcastAt: task.recoveryBroadcastAt ?? undefined,
     status: task.status,
     requestedAt: task.requestedAt ?? undefined,
     assignedAt: task.assignedAt,
@@ -126,6 +141,10 @@ function serializeArrivalNotice(n) {
     doctorDepartment: n.doctor?.department ?? undefined,
     doctorEmployeeId: n.doctor?.employeeId ?? undefined,
     eta: n.eta,
+    // Null while the request is still up for grabs by any valet.
+    ownerValetId: n.ownerValetId ?? undefined,
+    ownerValetName: n.ownerValet?.name,
+    arrivalAcceptedAt: n.arrivalAcceptedAt ?? undefined,
     createdAt: n.createdAt,
   };
 }

@@ -11,7 +11,13 @@ const list = asyncHandler(async (req, res) => {
     doctorId: parseId(doctorId), driverId: parseId(driverId), status, type,
     history: history === 'true',
   });
-  res.json({ tasks: tasks.map(serializeTask) });
+  // Valets only see retrievals they own, or ones that have been released back
+  // to the floor. Enforced server-side so a stale client can't act on a job
+  // it was never shown.
+  const visible = req.user.role === 'valet'
+    ? tasks.filter((t) => taskService.isVisibleToValet(t, req.user.id))
+    : tasks;
+  res.json({ tasks: visible.map(serializeTask) });
 });
 
 const get = asyncHandler(async (req, res) => {
@@ -114,6 +120,14 @@ const retrieve = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Valet: "Accept Retrieval". Available to the session owner inside their
+// window, and to any valet once the request has been released for recovery.
+// Which of those applies is decided in the service, atomically.
+const acceptRetrieval = asyncHandler(async (req, res) => {
+  const task = await require('../services/jobAlerts').claimRetrieval(parseId(req.params.id), req.user.id);
+  res.json({ task: serializeTask(task) });
+});
+
 // Valet: "Later" on the reassign prompt — an explicit "seen it, I'll handle
 // it". Restarts their escalation window so the whole team isn't pulled in
 // seconds after they just told us they're on it.
@@ -160,4 +174,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, acceptRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };

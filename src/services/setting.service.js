@@ -6,6 +6,11 @@ const DEFAULTS = {
   // Seconds a driver has to accept an assignment before the valet is
   // prompted to reassign ("1 min, changeable by admin").
   driverAcceptTimeoutSeconds: '60',
+  // Seconds the valet who owns a parking session gets to respond to that
+  // doctor's departure request before it is released to every available
+  // valet. Configurable because "how long is too long" is an operations
+  // call, not a code constant.
+  ownerResponseWindowSeconds: '60',
 };
 
 const CACHE_TTL_MS = 5000;
@@ -33,6 +38,12 @@ async function getAcceptTimeoutMs() {
   return seconds * 1000;
 }
 
+async function getOwnerResponseWindowMs() {
+  const raw = Number(await get('ownerResponseWindowSeconds'));
+  const seconds = Number.isFinite(raw) && raw >= 10 ? raw : 60;
+  return seconds * 1000;
+}
+
 async function update(patch) {
   const keys = Object.keys(patch).filter(k => k in DEFAULTS);
   for (const key of keys) {
@@ -46,4 +57,4 @@ async function update(patch) {
   return getAll();
 }
 
-module.exports = { getAll, get, getAcceptTimeoutMs, update, DEFAULTS };
+module.exports = { getAll, get, getAcceptTimeoutMs, getOwnerResponseWindowMs, update, DEFAULTS };

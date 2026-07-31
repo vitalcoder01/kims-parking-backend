@@ -12,8 +12,27 @@ const { serializeTask, serializeSlot } = require('../utils/serialize');
 
 // Realtime deltas: every mutation below emits the changed entity itself so
 // connected apps patch just that record — nobody refetches lists on events.
+// An owned retrieval is not broadcast to the valet role at all — the delta
+// goes to every other role plus the owning valet's own socket. Without this
+// the REST filter would be cosmetic: non-owners would still receive the
+// record over the socket and patch it straight into their inbox.
 function emitTask(task) {
-  realtime.emitAll('task:upsert', serializeTask(task));
+  const payload = serializeTask(task);
+  const owner = task.retrievalOwnerValetId ?? task.arrivalOwnerValetId;
+  // Exactly the inverse of isVisibleToValet's "open to all" test — the two
+  // must agree, or the socket shows a valet something the REST list then
+  // takes away on the next poll (or vice versa).
+  const restricted = task.type === 'retrieve' && owner != null && !isRetrievalOpenToAll(task);
+
+  if (!restricted) {
+    realtime.emitAll('task:upsert', payload);
+    return;
+  }
+  realtime.emitToRoles(['doctor', 'staff', 'driver', 'admin'], 'task:upsert', payload);
+  realtime.emitToUser(owner, 'task:upsert', payload);
+  // Anyone who was shown this during a recovery broadcast and has now lost it
+  // needs it taken off their screen, not left as a dead card.
+  realtime.emitToRoles(['valet'], 'task:restrict', { id: task.id, ownerValetId: owner });
 }
 function emitDriverPatch(id, status, currentTaskId) {
   realtime.emitAll('driver:patch', { id, status, currentTaskId: currentTaskId ?? undefined });
@@ -28,7 +47,33 @@ const taskInclude = {
   doctor: true,
   driver: { include: { user: true } },
   valet: true,
+  arrivalOwnerValet: true,
+  retrievalOwnerValet: true,
 };
+
+// A retrieval belongs to the valet who owns the doctor's parking session.
+// Until either they respond or their window lapses and it goes back out to
+// the floor, nobody else should see it at all — no card, no badge, no sound.
+// Arrival/park jobs stay visible to everyone: those are counter work.
+// Is this departure open to the whole floor right now? True in exactly two
+// cases: the session owner never answered and it was released, or whoever
+// held it then stalled and it escalated past them. Alerting valets about a
+// job they can't see is worse than not alerting them, so every alert path
+// has to keep this in step with itself.
+function isRetrievalOpenToAll(task) {
+  // A claim narrows it straight back down to one person — everyone else
+  // loses the action the moment someone takes it, even mid-recovery.
+  if (task.retrievalOwnerValetId != null) return task.escalatedAt != null;
+  return task.recoveryBroadcastAt != null || task.escalatedAt != null;
+}
+
+function isVisibleToValet(task, valetId) {
+  if (task.type !== 'retrieve') return true;
+  const owner = task.retrievalOwnerValetId ?? task.arrivalOwnerValetId;
+  if (owner == null) return true;               // never had an owner — open floor
+  if (owner === valetId) return true;           // theirs
+  return isRetrievalOpenToAll(task);
+}
 
 // A completed task is immutable, and every other transition only makes sense
 // from one specific prior state — without this, e.g. re-firing key-collected
@@ -203,7 +248,23 @@ async function createTask({ type, doctorId, carNumber, slotId, valetId }) {
   // notice they announced earlier is done, whether or not they ever sent
   // one (a no-op if there wasn't one).
   if (created) {
-    arrivalNoticeService.fulfillForDoctor(doctorId).catch(() => {});
+    // The parking session inherits whoever accepted the arrival. If the
+    // doctor never sent an arrival notice (walked straight up to the
+    // counter), the valet taking the key becomes the arrival owner instead.
+    const notice = await arrivalNoticeService.fulfillForDoctor(doctorId).catch(() => null);
+    const arrivalOwner = notice?.ownerValetId ?? valetId ?? null;
+    if (arrivalOwner) {
+      await prisma.parkingTask.update({
+        where: { id: task.id },
+        data: {
+          arrivalOwnerValetId: arrivalOwner,
+          arrivalAcceptedAt: notice?.arrivalAcceptedAt ?? new Date(),
+          valetId: arrivalOwner,
+        },
+      }).catch(() => {});
+      task.arrivalOwnerValetId = arrivalOwner;
+      task.valetId = arrivalOwner;
+    }
   }
 
   return { task, created };
@@ -227,6 +288,16 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
   const task = await runSerializable(async (tx) => {
     const slot = await tx.parkingSlot.findFirst({ where: { status: 'occupied', doctorId } });
     if (!slot) throw ApiError.badRequest('No parked car found for your account');
+
+    // Whoever owned this doctor's parking session owns the departure too, so
+    // the doctor deals with the same valet throughout. Looked up from the
+    // session being retired rather than carried on the doctor, because
+    // ownership belongs to the session.
+    const parkTask = await tx.parkingTask.findFirst({
+      where: { doctorId, type: 'park', arrivalOwnerValetId: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { arrivalOwnerValetId: true, arrivalAcceptedAt: true },
+    });
 
     // Only a still-live retrieval blocks a new one. 'cancelled' has to be
     // excluded alongside 'completed': it's equally terminal, and treating it
@@ -255,12 +326,41 @@ async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
         destinationLat: null,
         destinationLng: null,
         isCurrent: true,
+        // Owner-only window opens now. Until it lapses, no other valet sees
+        // this request (see listRetrievalRequestsFor / jobAlerts recovery).
+        arrivalOwnerValetId: parkTask?.arrivalOwnerValetId ?? null,
+        arrivalAcceptedAt: parkTask?.arrivalAcceptedAt ?? null,
+        valetId: parkTask?.arrivalOwnerValetId ?? null,
+        valetClaimedAt: parkTask?.arrivalOwnerValetId ? new Date() : null,
+        ownerNotifiedAt: parkTask?.arrivalOwnerValetId ? new Date() : null,
       },
       include: taskInclude,
     });
   });
   cache.invalidate('tasks:');
   emitTask(task);
+
+  // Owner-only alarm. `valet:<id>` addresses one person; the bare role name
+  // would broadcast to everyone and defeat the entire point of ownership.
+  // With no owner (a car parked before ownership existed, or a session whose
+  // owner's account is gone) it goes to the floor — that's correct, not a
+  // fallback: an unowned car still has to be retrieved.
+  const owner = task.arrivalOwnerValetId;
+  notificationService.push(owner
+    ? {
+        targetRole: `valet:${owner}`,
+        targetUserId: owner,
+        title: '🚗 Your doctor is leaving',
+        body: `${task.doctor?.name ?? 'A doctor'} has requested ${task.carNumber}. Please assign a driver.`,
+        type: 'alarm',
+      }
+    : {
+        targetRole: 'valet',
+        title: '🚗 Retrieval requested',
+        body: `${task.doctor?.name ?? 'A doctor'} has requested ${task.carNumber}.`,
+        type: 'alarm',
+      }).catch(() => {});
+
   return task;
 }
 
@@ -281,7 +381,7 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
       const task = await runSerializable(async (tx) => {
         const existing = await tx.parkingTask.findUnique({ where: { id: taskId } });
         if (!existing) throw ApiError.notFound('Task not found');
-        assertTransition(existing, ['requested', 'assigned'], 'assign a driver');
+        assertTransition(existing, ['requested', 'accepted', 'assigned'], 'assign a driver');
 
         // Once a driver has explicitly accepted, the job is theirs — silently
         // moving it to someone else left the first driver's app showing a job
@@ -307,6 +407,29 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
           throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
         }
 
+        // Session ownership, enforced on the write path rather than only in
+        // what each valet is shown — a client holding a stale card must not
+        // be able to act on a job that isn't theirs.
+        if (valetId && existing.type === 'retrieve') {
+          const retrievalOwner = existing.retrievalOwnerValetId;
+          // Lifts on escalation, exactly like the valetId claim above: an
+          // owner who has had their window and not acted can't hold a real
+          // car indefinitely.
+          if (retrievalOwner != null && retrievalOwner !== valetId && !existing.escalatedAt) {
+            const owner = await tx.user.findUnique({ where: { id: retrievalOwner }, select: { name: true } });
+            throw ApiError.conflict(`${owner?.name ?? 'Another valet'} has accepted this retrieval`, 'JOB_GONE');
+          }
+          // Still inside the session owner's private window — nobody else has
+          // even been shown this yet.
+          if (retrievalOwner == null
+              && existing.arrivalOwnerValetId != null
+              && existing.arrivalOwnerValetId !== valetId
+              && !existing.recoveryBroadcastAt) {
+            const owner = await tx.user.findUnique({ where: { id: existing.arrivalOwnerValetId }, select: { name: true } });
+            throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
+          }
+        }
+
         const driver = await tx.driver.findUnique({ where: { id: driverId } });
         if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
         if (driver.status !== 'available') throw ApiError.conflict('Driver is not available', 'DRIVER_BUSY');
@@ -316,6 +439,19 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
         // handover point. Naturally supports multiple valets (each one's own
         // location, not one shared fixed point) since it's captured fresh on
         // every assignment rather than configured once somewhere central.
+        // Assigning a driver is itself a response to the request, so it
+        // claims the retrieval for whoever did it. Written here (inside the
+        // same serializable transaction as the guard above) rather than as a
+        // follow-up call, so there is no window where the job is staffed but
+        // still unowned.
+        const claim = existing.type === 'retrieve' && valetId && existing.retrievalOwnerValetId !== valetId
+          ? {
+              retrievalOwnerValetId: valetId,
+              retrievalAcceptedAt: new Date(),
+              retrievalOwnershipSource: existing.arrivalOwnerValetId === valetId ? 'OWNER' : 'RECOVERY',
+            }
+          : {};
+
         const dest = existing.type === 'retrieve' && valetLocation
           ? { destinationLat: valetLocation.lat, destinationLng: valetLocation.lng }
           : {};
@@ -341,7 +477,7 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
         const updated = await tx.parkingTask.update({
           where: { id: taskId },
           // A (re)assignment restarts the accept handshake from scratch.
-          data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest, ...ownership },
+          data: { driverId, status: 'assigned', assignedAt: new Date(), acceptedAt: null, ...dest, ...claim, ...ownership },
           include: taskInclude,
         });
 
@@ -448,7 +584,7 @@ async function rejectTask(taskId, driverId) {
     const driverName = task.driver?.user?.name ?? 'Driver';
     const updated = await tx.parkingTask.update({
       where: { id: taskId },
-      data: { driverId: null, acceptedAt: null, ...(task.type === 'retrieve' && { status: 'requested' }) },
+      data: { driverId: null, acceptedAt: null, ...(task.type === 'retrieve' && { status: task.retrievalOwnerValetId ? 'accepted' : 'requested' }) },
       include: taskInclude,
     });
     // Only release this driver if they're still actually on THIS job — if
@@ -737,7 +873,7 @@ async function cancelTask(taskId) {
   // physically in a driver's hands. Those go through recallTask instead,
   // which tells the driver to bring it back rather than silently voiding a
   // job that's already in motion.
-  assertTransition(task, ['requested', 'assigned'], 'cancel');
+  assertTransition(task, ['requested', 'accepted', 'assigned'], 'cancel');
   watchdog.disarm('task', taskId);
 
   const { updated, freedDriver } = await runSerializable(async tx => {
@@ -836,6 +972,8 @@ async function markReturned(taskId, driverId) {
 }
 
 module.exports = {
+  isVisibleToValet,
+  isRetrievalOpenToAll,
   listTasks,
   getTask,
   createTask,

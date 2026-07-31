@@ -8,6 +8,7 @@ router.use(requireAuth);
 
 router.get('/', requireRole('valet', 'admin'), ctrl.list);
 router.post('/', requireRole('doctor', 'staff', 'admin'), ctrl.create);
+router.patch('/:id/accept', requireRole('valet'), ctrl.accept);
 router.patch('/:id/dismiss', requireRole('valet', 'admin'), ctrl.dismiss);
 
 module.exports = router;

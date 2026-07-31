@@ -124,10 +124,11 @@ const getSettings = asyncHandler(async (req, res) => {
 
 const updateSettings = asyncHandler(async (req, res) => {
   if (!req.body || typeof req.body !== 'object') throw ApiError.badRequest('settings object required');
-  if (req.body.driverAcceptTimeoutSeconds !== undefined) {
-    const n = Number(req.body.driverAcceptTimeoutSeconds);
+  for (const key of ['driverAcceptTimeoutSeconds', 'ownerResponseWindowSeconds']) {
+    if (req.body[key] === undefined) continue;
+    const n = Number(req.body[key]);
     if (!Number.isFinite(n) || n < 10 || n > 600) {
-      throw ApiError.badRequest('driverAcceptTimeoutSeconds must be between 10 and 600');
+      throw ApiError.badRequest(`${key} must be between 10 and 600`);
     }
   }
   res.json({ settings: await settingService.update(req.body) });

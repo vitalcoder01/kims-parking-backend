@@ -19,6 +19,9 @@ router.patch('/:id/park', requireRole('driver', 'admin'), ctrl.park);
 router.patch('/:id/retrieve', requireRole('driver', 'admin'), ctrl.retrieve);
 router.patch('/:id/confirm-delivered', requireRole('valet', 'admin'), ctrl.confirmDelivered);
 router.patch('/:id/cancel', requireRole('valet', 'admin'), ctrl.cancel);
+// Valet claims a departure request (owner, or recovery after the owner's
+// window lapsed). First one through the door wins.
+router.patch('/:id/accept-retrieval', requireRole('valet'), ctrl.acceptRetrieval);
 // Valet taps "Later" on a reassign prompt — defers escalation, doesn't cancel it.
 router.patch('/:id/acknowledge', requireRole('valet', 'admin'), ctrl.acknowledge);
 // Valet aborts a park job already in the driver's hands — "bring it back".
