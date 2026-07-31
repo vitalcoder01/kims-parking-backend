@@ -45,14 +45,23 @@ const suggestPlates = asyncHandler(async (req, res) => {
 
 const create = asyncHandler(async (req, res) => {
   const { name, carNumber, mobile, vehicleType } = req.body;
-  // Name and carNumber are both optional — a visitor may decline to give a
-  // name, and the plate may not be readable at intake. The mobile number is
-  // the one thing that must be right: it is how the token and the tracking
-  // link reach them, and a wrong one means a visitor with no way to get
-  // their car back.
+  // Two things must be right, for different reasons.
+  //
+  // The mobile number is how the token and the tracking link reach them — a
+  // wrong one leaves a visitor with no way to get their car back.
+  //
+  // The vehicle number is how the CAR is found: it is what the valet searches
+  // at the desk, what the driver matches against in the car park, and what
+  // ties a slot to a person. A session without it is a car nobody can locate.
+  //
+  // The name stays optional — a visitor may simply decline to give one, and
+  // refusing the check-in over it helps nobody.
   const digits = String(mobile ?? '').replace(/\D/g, '');
   if (digits.length !== 10) {
     throw ApiError.badRequest('A valid 10-digit mobile number is required');
+  }
+  if (!String(carNumber ?? '').trim()) {
+    throw ApiError.badRequest('Vehicle number is required');
   }
   const visitor = await visitorService.createVisitor({
     name, carNumber, mobile: digits, vehicleType, valetId: req.user.id,

@@ -88,6 +88,20 @@ function normalisePlate(v) {
   return String(v ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+// "AP 39 AB 1234" — the canonical spelling, mirroring the app's plate.ts.
+// Suggestions are rendered through this so the valet always sees one shape,
+// rather than whichever spelling that car happened to be entered with first
+// (we have the same plate stored as "AP39AB1234", "AP39 AB 1234" and
+// "AP-39-AB-1234"). Anything that doesn't parse is passed through untouched —
+// an older record, or a plate that simply isn't Indian-format.
+function formatPlate(v) {
+  const raw = normalisePlate(v);
+  const m = raw.match(/^([A-Z]{2})(\d{1,2})([A-Z]{0,3})(\d{1,4})$/);
+  if (!m) return String(v ?? '').trim().toUpperCase();
+  const [, state, rto, series, number] = m;
+  return [state, rto, series, number].filter(Boolean).join(' ');
+}
+
 // Resolve a public tracking token (or raw id) to the visitor behind it. The
 // tracking page and the WhatsApp link both carry the publicToken, never the
 // numeric id, so this is the entry point for every unauthenticated action.
@@ -161,16 +175,19 @@ async function markRetrievalRequested(id) {
   return updated;
 }
 
-async function suggestPlates(query, limit = 6) {
+async function suggestPlates(query, limit = 10) {
   const q = normalisePlate(query);
   if (q.length < 2) return [];   // one character matches most of the car park
 
+  // Every vehicle the system has ever seen, from the records that already
+  // exist — visitor check-ins and staff/doctor profiles. No second table, no
+  // separate vehicle registry to keep in step.
   const [visitors, users] = await Promise.all([
     prisma.visitor.findMany({
       where: { carNumber: { not: null } },
       select: { carNumber: true, createdAt: true },
       orderBy: { createdAt: 'desc' },
-      take: 400,
+      take: 800,
     }),
     prisma.user.findMany({
       where: { carNumber: { not: null } },
@@ -179,18 +196,37 @@ async function suggestPlates(query, limit = 6) {
     }),
   ]);
 
-  // Deduped on the normalised form, keeping the first (most recent) spelling
-  // of each plate so the suggestion looks the way a human wrote it.
-  const seen = new Map();
-  for (const row of [...visitors, ...users]) {
-    const raw = String(row.carNumber ?? '').trim();
-    if (!raw) continue;
+  // Ranked on how often a car has been here and how recently, because a
+  // regular visitor's plate is a far better guess than one seen once months
+  // ago. Keyed on the normalised form so "AP39AB1234" and "AP 39 AB 1234"
+  // count as the same car rather than competing with each other.
+  const stats = new Map();   // key -> { display, count, lastSeen }
+  const note = (rawPlate, seenAt) => {
+    const raw = String(rawPlate ?? '').trim();
+    if (!raw) return;
     const key = normalisePlate(raw);
-    if (!key.startsWith(q) || seen.has(key)) continue;
-    seen.set(key, raw.toUpperCase());
-    if (seen.size >= limit) break;
-  }
-  return [...seen.values()];
+    if (!key.startsWith(q)) return;
+    const prev = stats.get(key);
+    if (prev) {
+      prev.count += 1;
+      if (seenAt && (!prev.lastSeen || seenAt > prev.lastSeen)) prev.lastSeen = seenAt;
+    } else {
+      stats.set(key, { display: formatPlate(raw), count: 1, lastSeen: seenAt ?? null });
+    }
+  };
+
+  for (const v of visitors) note(v.carNumber, v.createdAt);
+  // Staff vehicles have no visit history here, so they carry no recency —
+  // they rank below anything actually parked, which is the honest order.
+  for (const u of users) note(u.carNumber, null);
+
+  return [...stats.values()]
+    .sort((a, b) =>
+      b.count - a.count
+      || (b.lastSeen?.getTime() ?? 0) - (a.lastSeen?.getTime() ?? 0)
+      || a.display.localeCompare(b.display))
+    .slice(0, limit)
+    .map(x => x.display);
 }
 
 async function getVisitor(id) {
@@ -206,9 +242,9 @@ async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) 
       // and refusing the check-in over it helps nobody. Stored as '' rather
       // than null so every reader sees a string.
       name: (name ?? '').trim(),
-      // Plate is optional at intake — the app allows registering a visitor
-      // before the car reaches the counter. Normalised so the same car typed
-      // three different ways matches itself later.
+      // Required at intake (see visitor.controller create) — it is how the
+      // car is found later. Normalised so the same car typed three different
+      // ways matches itself in search.
       carNumber: carNumber ? String(carNumber).trim().toUpperCase().replace(/\s+/g, ' ') : '',
       mobile: mobile.trim(),
       vehicleType: vehicleType === 'bike' ? 'bike' : 'car',
@@ -638,6 +674,7 @@ async function trackByPublicToken(idOrToken) {
 }
 
 module.exports = {
+  formatPlate,
   searchVisitors,
   getByPublicToken,
   markRetrievalRequested,
