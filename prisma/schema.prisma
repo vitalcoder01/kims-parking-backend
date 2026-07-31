@@ -79,7 +79,12 @@ model ParkingTask {
   assignedAt        DateTime?
   keyCollectedAt    DateTime?
   completedAt       DateTime?
-  eta               Int?
+  // The doctor's PLANNED DEPARTURE, in minutes (0 = now). This is planning
+  // information for the valet team — never a promise to the doctor, and
+  // never the basis of an ETA shown to them. Column stays `eta` so no data
+  // migration is needed; the name is corrected here because calling it "eta"
+  // is precisely what invited it to be rendered as an arrival estimate.
+  plannedDepartureMinutes Int? @map("eta")
   trackingProgress  Float?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt

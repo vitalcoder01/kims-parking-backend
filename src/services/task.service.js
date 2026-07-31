@@ -212,7 +212,13 @@ async function createTask({ type, doctorId, carNumber, slotId, valetId }) {
 // Doctor/staff: request retrieval of their own currently-parked car. This is
 // the ONLY way a retrieve task can come into existence — the valet cannot
 // invent one — so a driver never gets sent to pull a car nobody asked for.
-async function requestRetrieval({ doctorId, eta }) {
+// Allowed planned-departure values. 0 means "leaving now".
+const PLANNED_DEPARTURE_MINUTES = [0, 10, 20, 30, 40];
+
+async function requestRetrieval({ doctorId, plannedDepartureMinutes }) {
+  if (plannedDepartureMinutes != null && !PLANNED_DEPARTURE_MINUTES.includes(plannedDepartureMinutes)) {
+    throw ApiError.badRequest(`plannedDepartureMinutes must be one of ${PLANNED_DEPARTURE_MINUTES.join(', ')}`);
+  }
   // No destination yet at request time — the real pickup point is wherever
   // the valet who assigns a driver to this happens to be standing (see
   // assignDriver below), since that's the actual physical handover spot,
@@ -245,7 +251,7 @@ async function requestRetrieval({ doctorId, eta }) {
         slotId: slot.id,
         status: 'requested',
         requestedAt: new Date(),
-        eta: eta ?? null,
+        plannedDepartureMinutes: plannedDepartureMinutes ?? null,
         destinationLat: null,
         destinationLng: null,
         isCurrent: true,

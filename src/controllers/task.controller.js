@@ -48,8 +48,14 @@ const create = asyncHandler(async (req, res) => {
 // GPS destination is wherever they are standing right now (their own
 // phone) — that's who the driver is actually bringing it back to.
 const requestRetrieval = asyncHandler(async (req, res) => {
-  const { eta } = req.body;
-  const task = await taskService.requestRetrieval({ doctorId: req.user.id, eta });
+  // The doctor's planned departure — planning info for the valet team, not
+  // an arrival estimate. Accepts the legacy `eta` key so an older installed
+  // build keeps working through the rollout.
+  const plannedDepartureMinutes = req.body.plannedDepartureMinutes ?? req.body.eta;
+  const task = await taskService.requestRetrieval({
+    doctorId: req.user.id,
+    plannedDepartureMinutes: plannedDepartureMinutes == null ? null : Number(plannedDepartureMinutes),
+  });
   res.status(201).json({ task: serializeTask(task) });
 });
 

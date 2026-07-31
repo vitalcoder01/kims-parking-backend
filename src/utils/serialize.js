@@ -30,7 +30,8 @@ function serializeTask(task) {
     acceptedAt: task.acceptedAt ?? undefined,
     startedAt: task.startedAt ?? undefined,
     recalledAt: task.recalledAt ?? undefined,
-    eta: task.eta ?? undefined,
+    // Planned departure, not an ETA — see ParkingTask in schema.prisma.
+    plannedDepartureMinutes: task.plannedDepartureMinutes ?? undefined,
     trackingProgress: task.trackingProgress ?? undefined,
     driverLat: task.driverLat ?? undefined,
     driverLng: task.driverLng ?? undefined,
