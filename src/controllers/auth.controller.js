@@ -1,6 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const authService = require('../services/auth.service');
+const userService = require('../services/user.service');
 const { serializeUser } = require('../utils/serialize');
 
 const login = asyncHandler(async (req, res) => {
@@ -12,8 +13,16 @@ const login = asyncHandler(async (req, res) => {
   res.json({ token, user: serializeUser(user) });
 });
 
+// Public — a doctor/staff member creating their own login. See
+// userService.selfRegister for why this is deliberately minimal.
+const register = asyncHandler(async (req, res) => {
+  const { name, phone, password } = req.body;
+  const { token, user } = await userService.selfRegister({ name, phone, password });
+  res.status(201).json({ token, user: serializeUser(user) });
+});
+
 const me = asyncHandler(async (req, res) => {
   res.json({ user: serializeUser(req.user) });
 });
 
-module.exports = { login, me };
+module.exports = { login, me, register };

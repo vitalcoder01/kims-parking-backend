@@ -8,5 +8,6 @@ router.use(requireAuth);
 
 router.get('/by-card/:code', requireRole('valet', 'admin'), ctrl.lookupByCardCode);
 router.patch('/me', ctrl.updateMe);
+router.patch('/me/designation', ctrl.updateMyDesignation);
 
 module.exports = router;

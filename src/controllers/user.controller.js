@@ -15,4 +15,14 @@ const updateMe = asyncHandler(async (req, res) => {
   res.json({ user: serializeUser(user) });
 });
 
-module.exports = { lookupByCardCode, updateMe };
+// The one-time follow-up after self-registration — correcting the default
+// 'doctor' designation to 'staff'. See userService.updateOwnDesignation for
+// why this is safe to leave as a standalone, repeatable endpoint rather
+// than a general role-change (it can only ever produce doctor or staff).
+const updateMyDesignation = asyncHandler(async (req, res) => {
+  const { role } = req.body;
+  const user = await userService.updateOwnDesignation(req.user.id, role);
+  res.json({ user: serializeUser(user) });
+});
+
+module.exports = { lookupByCardCode, updateMe, updateMyDesignation };

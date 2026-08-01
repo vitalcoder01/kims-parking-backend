@@ -5,6 +5,7 @@ const { invalidateUserCache } = require('../middleware/auth.middleware');
 const cache = require('../utils/responseCache');
 const realtime = require('../realtime');
 const { serializeTask } = require('../utils/serialize');
+const { signToken } = require('../utils/jwt');
 
 // What staff actually type to log in — no employee codes to remember. Admin
 // accounts are exempt (their `name` IS the literal login, e.g. "Admin1") since
@@ -24,6 +25,40 @@ async function generateUniqueLoginName(tx, role, name, excludeUserId) {
     n += 1;
   }
   return candidate;
+}
+
+// Self-registered accounts log in as exactly what they typed — "aditya"
+// stays "aditya" forever, never gains a "Dr."/"Staff" prefix the way
+// admin-created accounts do, regardless of which role they end up as. Same
+// disambiguation on a collision ("aditya 2"), just no LOGIN_PREFIX applied.
+async function generateUniqueRawLoginName(tx, name, excludeUserId) {
+  const base = name.trim();
+  let candidate = base;
+  let n = 2;
+  while (await tx.user.findFirst({
+    where: { username: { equals: candidate, mode: 'insensitive' }, ...(excludeUserId && { id: { not: excludeUserId } }) },
+  })) {
+    candidate = `${base} ${n}`;
+    n += 1;
+  }
+  return candidate;
+}
+
+// A self-registered account has no admin-assigned valet card code to type
+// in, so one is picked automatically — same 3-digit format, same uniqueness
+// rule as an admin-assigned one, just generated instead of typed. Retries
+// on a collision rather than failing outright; the code space (000-999) is
+// large enough relative to headcount that this converges in one or two
+// tries almost always.
+async function generateUniqueCardCode(tx) {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const candidate = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+    const taken = await tx.user.findUnique({ where: { cardCode: candidate } });
+    if (!taken) return candidate;
+  }
+  // Practically unreachable (1000 codes vs. a hospital's actual headcount),
+  // but a real error here beats an infinite loop or a silently null code.
+  throw ApiError.conflict('Could not generate a card code — please try again');
 }
 
 // Used by the valet "Collect Key" flow to identify a doctor/staff member by
@@ -220,4 +255,72 @@ async function updateOwnProfile(id, { carNumber, phone }) {
   return updated;
 }
 
-module.exports = { findByCardCode, listUsers, createUser, updateUser, resetPassword, deleteUser, updateOwnProfile };
+// Public, unauthenticated — a doctor/staff member creating their own login
+// instead of an admin typing it in for them. Deliberately minimal: name,
+// phone, password, nothing else required.
+//
+// The phone number doubles as `employeeId` — the column that already
+// enforces "one account per real identity" for admin-created accounts. This
+// reuses that exact constraint instead of adding a new one: no schema
+// change, and a duplicate signup attempt fails with the same clear
+// "already in use" conflict admin's own form already produces.
+//
+// Role defaults to 'doctor' immediately (not left null/pending) so the
+// account is fully usable the instant it's created — see
+// updateOwnDesignation for the follow-up screen that lets them correct it
+// to 'staff' if that's what they actually are. Card code is generated here
+// too, not left for an admin to fill in later, so the valet counter can
+// recognize them from the very first day.
+async function selfRegister({ name, phone, password }) {
+  const trimmedName = (name ?? '').trim();
+  const digits = (phone ?? '').replace(/\D/g, '');
+  if (!trimmedName) throw ApiError.badRequest('Name is required');
+  if (digits.length !== 10) throw ApiError.badRequest('Enter a valid 10-digit phone number');
+  if (!password || password.length < 8 || password.length > 64) {
+    throw ApiError.badRequest('Password must be 8–64 characters');
+  }
+
+  const existing = await prisma.user.findUnique({ where: { employeeId: digits } });
+  if (existing) {
+    throw ApiError.conflict('This phone number is already registered — log in instead');
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  const user = await prisma.$transaction(async (tx) => {
+    const username = await generateUniqueRawLoginName(tx, trimmedName);
+    const cardCode = await generateUniqueCardCode(tx);
+    return tx.user.create({
+      data: {
+        employeeId: digits,
+        username,
+        password: passwordHash,
+        name: trimmedName,
+        role: 'doctor',
+        phone: digits,
+        cardCode,
+      },
+    });
+  });
+
+  const token = signToken({ sub: user.id, role: user.role });
+  return { token, user };
+}
+
+// The one-time (though not enforced as such — see below) follow-up to
+// selfRegister: correcting the default 'doctor' role to 'staff' if that's
+// what they actually are. Deliberately NOT a general "change my role"
+// endpoint — doctor and staff carry identical permissions everywhere in
+// this app (same screens, same actions), so toggling between only these
+// two is safe to leave open-ended rather than tracking whether it's
+// already been set once. It can never be used to reach valet/driver/admin.
+async function updateOwnDesignation(id, role) {
+  if (role !== 'doctor' && role !== 'staff') {
+    throw ApiError.badRequest('Designation must be doctor or staff');
+  }
+  const updated = await prisma.user.update({ where: { id }, data: { role }, include: { driver: true } });
+  invalidateUserCache(id);
+  return updated;
+}
+
+module.exports = { findByCardCode, listUsers, createUser, updateUser, resetPassword, deleteUser, updateOwnProfile, selfRegister, updateOwnDesignation };
