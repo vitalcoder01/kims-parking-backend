@@ -218,14 +218,16 @@ async function deleteUser(id) {
   }
 }
 
-// Self-service — a user updating their own car number/phone, not an admin
+// Self-service — a user updating their own car details/phone, not an admin
 // editing someone else's account (see updateUser for that, admin-only).
-async function updateOwnProfile(id, { carNumber, phone }) {
+async function updateOwnProfile(id, { carNumber, phone, carModel, carColor }) {
   const updated = await prisma.user.update({
     where: { id },
     data: {
       ...(carNumber !== undefined && { carNumber: carNumber?.trim().toUpperCase() || null }),
       ...(phone !== undefined && { phone: phone?.trim() || null }),
+      ...(carModel !== undefined && { carModel: carModel?.trim() || null }),
+      ...(carColor !== undefined && { carColor: carColor?.trim() || null }),
     },
     include: { driver: true },
   });

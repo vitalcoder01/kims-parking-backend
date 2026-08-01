@@ -4,9 +4,18 @@ const { signToken } = require('../utils/jwt');
 const ApiError = require('../utils/ApiError');
 
 async function login(loginName, password) {
-  // Case-insensitive — nobody should get locked out over "dr." vs "Dr.".
+  const trimmed = loginName.trim();
+  // Case-insensitive on username — nobody should get locked out over "dr."
+  // vs "Dr.". Self-registered accounts can also log in with the phone
+  // number they signed up with (stored as employeeId) — they may not
+  // remember exactly how they capitalized/typed their name.
   const user = await prisma.user.findFirst({
-    where: { username: { equals: loginName.trim(), mode: 'insensitive' } },
+    where: {
+      OR: [
+        { username: { equals: trimmed, mode: 'insensitive' } },
+        { employeeId: { equals: trimmed, mode: 'insensitive' } },
+      ],
+    },
     include: { driver: true },
   });
   if (!user) throw ApiError.unauthorized('Invalid login name or password');

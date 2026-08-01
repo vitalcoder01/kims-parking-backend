@@ -7,11 +7,11 @@ const lookupByCardCode = asyncHandler(async (req, res) => {
   res.json({ user: serializeUser(user) });
 });
 
-// Self-service profile update — deliberately narrow (car number, phone
+// Self-service profile update — deliberately narrow (car details, phone
 // only). Role/password/employeeId changes stay admin-only via /admin/users.
 const updateMe = asyncHandler(async (req, res) => {
-  const { carNumber, phone } = req.body;
-  const user = await userService.updateOwnProfile(req.user.id, { carNumber, phone });
+  const { carNumber, phone, carModel, carColor } = req.body;
+  const user = await userService.updateOwnProfile(req.user.id, { carNumber, phone, carModel, carColor });
   res.json({ user: serializeUser(user) });
 });
 

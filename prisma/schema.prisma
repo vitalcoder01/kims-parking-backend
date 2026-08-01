@@ -16,7 +16,14 @@ model User {
   department          String?
   cardCode            String?        @unique
   carNumber           String?
+  carModel            String?
+  carColor            String?
   phone               String?
+  // Admin-created accounts are pre-vetted by the admin who typed them in, so
+  // they default to already approved. Self-registered accounts start
+  // unapproved and can't reach the app past the designation screen until an
+  // admin approves them — see userService.selfRegister / approveUser.
+  approved            Boolean        @default(true)
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
   username            String         @unique
