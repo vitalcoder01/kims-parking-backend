@@ -16,9 +16,20 @@ initRealtime(server);
 // Accept countdowns live in memory, so a deploy/crash would otherwise strand
 // every assignment that was still awaiting acceptance — no timeout, no
 // reassign prompt, driver stuck busy. Re-arm them from the DB on boot.
-require('./services/acceptWatchdog').rehydrate().catch((err) => {
+const acceptWatchdog = require('./services/acceptWatchdog');
+acceptWatchdog.rehydrate().catch((err) => {
   // eslint-disable-next-line no-console
   console.warn('[kims-parking-backend] watchdog rehydrate failed:', err.message);
+});
+
+// One-time repair for any driver assignment left orphaned by a bug fixed
+// alongside this (see acceptWatchdog.js) — a task still holding a driverId
+// with an active status after that driver was freed elsewhere, silently
+// blocking every future assignment of that driver via the DB's unique
+// index. Safe to run on every boot.
+acceptWatchdog.reconcileOrphanedDriverAssignments().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.warn('[kims-parking-backend] orphaned-assignment reconcile failed:', err.message);
 });
 
 // Escalation ladder for jobs whose owning valet hasn't acted — see

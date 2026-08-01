@@ -144,14 +144,35 @@ async function fireVisitorTimeout(visitorId, driverId) {
       data: { driverId: null, driverAssignedAt: null, acceptedAt: null, trackingProgress: 0 },
       include: visitorInclude,
     });
+    // The visitor's check-in also created a real ParkingTask (see
+    // visitor.service.js) that assignDriver stamped with this same
+    // driverId. Freeing the driver and the visitor row without also
+    // rolling THIS back left an orphaned task row still holding driverId —
+    // invisible everywhere (driver shows available, visitor shows
+    // unassigned) except to the DB's one-active-job-per-driver index,
+    // which then blocked every future assignment of this driver with the
+    // unhelpful raw constraint error, looking like driver-data corruption.
+    const linkedTask = await tx.parkingTask.findFirst({ where: { visitorId, type: 'park', isCurrent: true } });
+    let updatedTask = null;
+    if (linkedTask && linkedTask.driverId === driverId) {
+      updatedTask = await tx.parkingTask.update({
+        where: { id: linkedTask.id },
+        data: { driverId: null, acceptedAt: null },
+        include: taskInclude,
+      });
+    }
     await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
-    return { updated, driverName };
+    return { updated, driverName, updatedTask };
   });
   if (!rolledBack) return;
 
   cache.invalidate('visitors:');
   cache.invalidate('drivers:');
-  const { updated, driverName } = rolledBack;
+  const { updated, driverName, updatedTask } = rolledBack;
+  if (updatedTask) {
+    cache.invalidate('tasks:');
+    realtime.emitAll('task:upsert', serializeTask(updatedTask));
+  }
   realtime.emitToDriver(driverId, 'assignment:cancelled', { kind: 'visitor', id: visitorId });
   const serialized = serializeVisitor(updated);
   realtime.emitAll('visitor:upsert', serialized);
@@ -159,4 +180,35 @@ async function fireVisitorTimeout(visitorId, driverId) {
   await jobAlerts().alertVisitorNeedsDriver(updated, driverName);
 }
 
-module.exports = { arm, disarm, rehydrate };
+// One-time startup repair for exactly the corruption fireVisitorTimeout used
+// to cause before the fix above: a ParkingTask left holding a driverId with
+// an active status (assigned/key_collected/in_transit) after that driver had
+// already been freed elsewhere, so the driver shows "Ready" everywhere while
+// the DB's one-active-job-per-driver index still silently blocks assigning
+// them to anything, with only a raw constraint error to show for it. The
+// invariant this restores: if a driver is genuinely on a job, that job's id
+// is their own currentTaskId — anything else pointing at them is a leftover.
+// Safe to run on every boot; a clean DB makes this a fast no-op query.
+async function reconcileOrphanedDriverAssignments() {
+  const orphaned = await prisma.parkingTask.findMany({
+    where: { status: { in: ['assigned', 'key_collected', 'in_transit'] }, driverId: { not: null } },
+    include: { driver: true },
+  });
+  const stale = orphaned.filter((t) => t.driver && t.driver.currentTaskId !== t.id);
+  if (stale.length === 0) return 0;
+
+  for (const task of stale) {
+    const updated = await prisma.parkingTask.update({
+      where: { id: task.id },
+      data: { driverId: null, acceptedAt: null },
+      include: taskInclude,
+    });
+    realtime.emitAll('task:upsert', serializeTask(updated));
+  }
+  cache.invalidate('tasks:');
+  // eslint-disable-next-line no-console
+  console.log(`[acceptWatchdog] reconciled ${stale.length} orphaned driver assignment(s) on boot`);
+  return stale.length;
+}
+
+module.exports = { arm, disarm, rehydrate, reconcileOrphanedDriverAssignments };
