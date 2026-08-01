@@ -289,7 +289,7 @@ async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) 
   //
   // Created here, unassigned, mirroring createTask for staff: the valet then
   // picks a driver through the same assignDriver call.
-  await prisma.parkingTask.create({
+  const linkedTask = await prisma.parkingTask.create({
     data: {
       type: 'park',
       visitorId: visitor.id,
@@ -300,11 +300,20 @@ async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) 
       valetId: valetId ?? null,
       valetClaimedAt: valetId ? new Date() : null,
     },
-  }).catch(() => { /* a missing task must not fail the check-in */ });
+    include: { doctor: true, driver: { include: { user: true } } },
+  }).catch(() => null); // a missing task must not fail the check-in
 
   cache.invalidate('tasks:');
   cache.invalidate('visitors:');
   emitVisitor(visitor);
+  // Without this, the visitor's job never appeared on anyone's Job Queue in
+  // real time — createTask (the staff equivalent) broadcasts on creation,
+  // but this path never did. A valet who backed out of the assign screen
+  // straight after check-in (Skip, or just the back arrow) had no way back
+  // in: no queue card ever showed up to retry "Assign driver" from, since
+  // nothing told any connected app this task existed until their next full
+  // reconnect/refetch.
+  if (linkedTask) taskService().emitTask(linkedTask);
 
   // Fire-and-forget, and deliberately AFTER the record exists: the visitor is
   // already parked either way, so a WhatsApp failure must never fail the
