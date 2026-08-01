@@ -14,6 +14,9 @@ router.get('/search', requireRole('valet', 'admin'), ctrl.search);
 router.post('/', requireRole('valet', 'admin'), ctrl.create);
 router.patch('/:id', requireRole('valet', 'driver', 'admin'), ctrl.update);
 router.patch('/:id/assign', requireRole('valet', 'admin'), ctrl.assignDriver);
+// Valet gives up on a driver who hasn't accepted this pickup yet — right
+// now, instead of waiting out the accept-timeout window. Token untouched.
+router.patch('/:id/cancel-assignment', requireRole('valet', 'admin'), ctrl.cancelAssignment);
 router.patch('/:id/accept', requireRole('driver', 'admin'), ctrl.accept);
 router.patch('/:id/reject', requireRole('driver', 'admin'), ctrl.reject);
 router.patch('/:id/pickup', requireRole('driver', 'admin'), ctrl.pickup);

@@ -74,6 +74,13 @@ const assignDriver = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Valet: give up on a driver who hasn't accepted this job yet, right now,
+// instead of waiting out the accept-timeout window.
+const cancelAssignment = asyncHandler(async (req, res) => {
+  const task = await taskService.cancelPendingAssignment(parseId(req.params.id));
+  res.json({ task: serializeTask(task) });
+});
+
 // Driver: explicit accept/decline of an assignment — ownership enforced by
 // passing the caller's own driver id into the service.
 const accept = asyncHandler(async (req, res) => {
@@ -182,4 +189,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };

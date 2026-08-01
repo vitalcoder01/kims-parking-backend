@@ -4,6 +4,7 @@
 // to pick someone else. Lives server-side so it fires even if every phone
 // involved is locked in a pocket.
 const prisma = require('../config/database');
+const ApiError = require('../utils/ApiError');
 const runSerializable = require('../utils/runSerializable');
 const cache = require('../utils/responseCache');
 const settingService = require('./setting.service');
@@ -130,6 +131,7 @@ async function fireTaskTimeout(taskId, driverId) {
   // Owner-targeted rather than broadcast to every valet — jobAlerts decides
   // who to address, and its sweep escalates if the owner doesn't act.
   await jobAlerts().alertTaskNeedsDriver(updated, driverName);
+  return updated;
 }
 
 async function fireVisitorTimeout(visitorId, driverId) {
@@ -178,6 +180,7 @@ async function fireVisitorTimeout(visitorId, driverId) {
   realtime.emitAll('visitor:upsert', serialized);
   realtime.emitAll('driver:patch', { id: driverId, status: 'available', currentTaskId: null });
   await jobAlerts().alertVisitorNeedsDriver(updated, driverName);
+  return updated;
 }
 
 // One-time startup repair for exactly the corruption fireVisitorTimeout used
@@ -211,4 +214,31 @@ async function reconcileOrphanedDriverAssignments() {
   return stale.length;
 }
 
-module.exports = { arm, disarm, rehydrate, reconcileOrphanedDriverAssignments };
+// Valet-initiated version of what fireTaskTimeout does automatically —
+// same rollback, same driver notification, same "needs a driver" alert,
+// just triggered immediately instead of waiting out the accept window. Lets
+// a valet who picked the wrong driver (or wants to try someone faster) free
+// them right away without cancelling the whole job.
+async function cancelTaskAssignment(taskId) {
+  const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
+  if (!task || !task.driverId || task.acceptedAt || task.status !== 'assigned') {
+    throw ApiError.conflict('There is no pending driver assignment to cancel on this job');
+  }
+  disarm('task', taskId);
+  return fireTaskTimeout(taskId, task.driverId);
+}
+
+// Same, for a visitor's pickup assignment.
+async function cancelVisitorAssignment(visitorId) {
+  const visitor = await prisma.visitor.findUnique({ where: { id: visitorId } });
+  if (!visitor || !visitor.driverId || visitor.acceptedAt || visitor.status !== 'pending') {
+    throw ApiError.conflict('There is no pending driver assignment to cancel on this visitor');
+  }
+  disarm('visitor', visitorId);
+  return fireVisitorTimeout(visitorId, visitor.driverId);
+}
+
+module.exports = {
+  arm, disarm, rehydrate, reconcileOrphanedDriverAssignments,
+  cancelTaskAssignment, cancelVisitorAssignment,
+};

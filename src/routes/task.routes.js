@@ -11,6 +11,9 @@ router.get('/:id', ctrl.get);
 router.post('/', requireRole('valet', 'admin'), ctrl.create);
 router.post('/request-retrieval', requireRole('doctor', 'staff', 'admin'), ctrl.requestRetrieval);
 router.patch('/:id/assign', requireRole('valet', 'admin'), ctrl.assignDriver);
+// Valet gives up on a driver who hasn't accepted yet — right now, instead of
+// waiting out the accept-timeout window. Frees the driver, job stays open.
+router.patch('/:id/cancel-assignment', requireRole('valet', 'admin'), ctrl.cancelAssignment);
 router.patch('/:id/accept', requireRole('driver', 'admin'), ctrl.accept);
 router.patch('/:id/reject', requireRole('driver', 'admin'), ctrl.reject);
 router.patch('/:id/key-collected', requireRole('valet', 'admin'), ctrl.keyCollected);

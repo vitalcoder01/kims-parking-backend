@@ -373,6 +373,14 @@ async function assignDriver(visitorId, driverId, valetId) {
   return updated;
 }
 
+// Valet: give up on a driver who hasn't accepted this pickup yet,
+// immediately, instead of waiting out the accept-timeout window. Frees the
+// driver and puts the job back to "needs a driver" — the visitor's token
+// stays exactly as it was, nothing about the check-in itself is touched.
+async function cancelPendingAssignment(visitorId) {
+  return watchdog.cancelVisitorAssignment(visitorId);
+}
+
 async function acceptTask(visitorId, driverId) {
   const visitor = await prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
   if (!visitor) throw ApiError.notFound('Visitor not found');
@@ -672,7 +680,7 @@ module.exports = {
   suggestPlates,
   normalisePlate,
   listVisitors, getVisitor, createVisitor, updateVisitor,
-  assignDriver, acceptTask, rejectTask, markPickedUp, cancelVisitor,
+  assignDriver, cancelPendingAssignment, acceptTask, rejectTask, markPickedUp, cancelVisitor,
   markParked, requestRetrieval, assignRetrievalDriver, markRetrieved, confirmDelivered,
   trackByPublicToken,
   // Back-compat alias for existing callers (track page controller).

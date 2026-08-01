@@ -1056,6 +1056,14 @@ async function updateLocation(taskId, lat, lng, driverId) {
   return updated;
 }
 
+// Valet: give up on a driver who hasn't accepted yet, immediately, instead
+// of waiting out the accept-timeout window. Frees the driver and puts the
+// job back to "needs a driver" — the job itself (and its token, for a
+// visitor) is untouched. See acceptWatchdog.cancelTaskAssignment.
+async function cancelPendingAssignment(taskId) {
+  return watchdog.cancelTaskAssignment(taskId);
+}
+
 // Staff/admin: retire a task that's stuck (no driver ever assigned/accepted,
 // or genuinely abandoned) without waiting for a new session to naturally
 // supersede it. Terminal, same weight as completed — just an honest outcome
@@ -1272,6 +1280,7 @@ module.exports = {
   createTask,
   requestRetrieval,
   assignDriver,
+  cancelPendingAssignment,
   acceptTask,
   rejectTask,
   markKeyCollected,

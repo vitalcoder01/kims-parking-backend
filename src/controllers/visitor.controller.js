@@ -111,6 +111,13 @@ const assignDriver = asyncHandler(async (req, res) => {
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
+// Valet: give up on a driver who hasn't accepted this pickup yet, right
+// now, instead of waiting out the accept-timeout window.
+const cancelAssignment = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.cancelPendingAssignment(parseId(req.params.id));
+  res.json({ visitor: serializeVisitor(visitor) });
+});
+
 // Same gap task.controller.js had: park/retrieve are driver actions but
 // never verified the caller was actually the driver assigned to this job.
 async function assertOwnDriverVisitor(req, id) {
@@ -162,4 +169,4 @@ const track = asyncHandler(async (req, res) => {
 });
 
 
-module.exports = { search, requestVisitorRetrieval, suggestPlates, list, create, update, assignDriver, accept, reject, pickup, cancel, park, assignRetrievalDriver, retrieve, confirmDelivered, track };
+module.exports = { search, requestVisitorRetrieval, suggestPlates, list, create, update, assignDriver, cancelAssignment, accept, reject, pickup, cancel, park, assignRetrievalDriver, retrieve, confirmDelivered, track };
