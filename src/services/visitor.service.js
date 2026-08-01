@@ -257,7 +257,27 @@ async function getVisitor(id) {
   return visitor;
 }
 
+// A double-tap on "Check In" (or a slow first request retried) otherwise
+// created two full Visitor rows — this path had no guard at all, client or
+// server, unlike createTask's equivalent for staff. Mirrors that guard:
+// return the existing check-in instead of creating a duplicate, but only
+// within a short window — a genuinely new visitor arriving later with the
+// same plate/mobile (a repeat guest) must still get their own token.
+const DUPLICATE_TAP_MS = 2 * 60 * 1000;
+
 async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) {
+  const normalizedCarNumber = carNumber ? String(carNumber).trim().toUpperCase().replace(/\s+/g, ' ') : '';
+  const normalizedMobile = mobile.trim();
+
+  const recent = await prisma.visitor.findFirst({
+    where: { carNumber: normalizedCarNumber, mobile: normalizedMobile, status: 'pending' },
+    orderBy: { createdAt: 'desc' },
+    include: visitorInclude,
+  });
+  if (recent && Date.now() - recent.createdAt.getTime() < DUPLICATE_TAP_MS) {
+    return recent;
+  }
+
   const visitor = await prisma.visitor.create({
     data: {
       // Name is optional: a visitor who won't give one still needs a token,
@@ -267,8 +287,8 @@ async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) 
       // Required at intake (see visitor.controller create) — it is how the
       // car is found later. Normalised so the same car typed three different
       // ways matches itself in search.
-      carNumber: carNumber ? String(carNumber).trim().toUpperCase().replace(/\s+/g, ' ') : '',
-      mobile: mobile.trim(),
+      carNumber: normalizedCarNumber,
+      mobile: normalizedMobile,
       vehicleType: vehicleType === 'bike' ? 'bike' : 'car',
       token: generateToken(),
       status: 'pending',
