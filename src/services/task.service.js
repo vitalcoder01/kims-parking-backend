@@ -571,7 +571,8 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
 
         const driver = await tx.driver.findUnique({ where: { id: driverId } });
         if (!driver) throw ApiError.badRequest('driverId does not reference a valid driver');
-        if (driver.status !== 'available') throw ApiError.conflict('Driver is not available', 'DRIVER_BUSY');
+        if (driver.status === 'busy') throw ApiError.conflict('This driver is already assigned to another job', 'DRIVER_BUSY');
+        if (driver.status !== 'available') throw ApiError.conflict('This driver is off duty', 'DRIVER_BUSY');
 
         // A retrieve task's real destination is wherever the valet assigning
         // this driver happens to be standing right now — the actual physical

@@ -10,16 +10,26 @@ function notFoundHandler(req, res, next) {
 // Constraints that exist to enforce a real operational rule, not just data
 // hygiene — a raw "Duplicate value for: driverId" tells a valet nothing
 // about what they actually did wrong or what to do instead.
-const CONSTRAINT_MESSAGES = {
-  parking_tasks_driver_active_idx: 'That driver is already on another job',
-  parking_tasks_doctor_current_idx: 'This person already has an active parking session',
-};
+//
+// Matched by substring, not exact equality: these two indexes aren't part
+// of Prisma's schema DSL (written by hand in a migration — see
+// schema.prisma's comments on ParkingTask), so Prisma has no field metadata
+// for them and reports whatever the Postgres driver gives it — which varies
+// between the index name and the bare column name depending on version/path.
+// An exact-match lookup silently missed the column-name form and fell
+// through to the raw "Duplicate value for: driverId" message, which is
+// exactly the unhelpful text this table exists to avoid.
+const CONSTRAINT_MESSAGES = [
+  {test: /driver/i, message: 'This driver is already assigned to another job'},
+  {test: /doctor_current|doctorId/i, message: 'This person already has an active parking session'},
+];
 
 function constraintMessage(err) {
   const target = err.meta?.target;
   const keys = Array.isArray(target) ? target : [target].filter(Boolean);
-  for (const key of keys) {
-    if (CONSTRAINT_MESSAGES[key]) return CONSTRAINT_MESSAGES[key];
+  const haystack = keys.join(' ');
+  for (const {test, message} of CONSTRAINT_MESSAGES) {
+    if (test.test(haystack)) return message;
   }
   return `Duplicate value for: ${keys.join(', ') || 'unique field'}`;
 }
