@@ -5,14 +5,13 @@ const realtime = require('../realtime');
 const watchdog = require('./acceptWatchdog');
 const notificationService = require('./notification.service');
 const assignLocks = require('./assignLocks');
-const jobAlerts = require('./jobAlerts');
 const runSerializable = require('../utils/runSerializable');
 
 // Lazy: task.service requires this module too, so a top-level require would
 // be circular and one side would see an empty object.
 function taskService() { return require('./task.service'); }
 const whatsapp = require('./whatsapp.service');
-const { serializeVisitor, serializeSlot } = require('../utils/serialize');
+const { serializeVisitor } = require('../utils/serialize');
 
 // Public tracking links carry either the publicToken (a non-numeric cuid)
 // or, for old-style callers, the raw numeric id — `id` is now an Int
@@ -81,9 +80,6 @@ function emitVisitor(visitor) {
 }
 function emitDriverPatch(id, status, currentTaskId) {
   realtime.emitAll('driver:patch', { id, status, currentTaskId: currentTaskId ?? undefined });
-}
-function emitSlot(slot) {
-  realtime.emitAll('slot:patch', serializeSlot(slot));
 }
 
 function assertTransition(visitor, allowed, action) {
@@ -381,66 +377,52 @@ async function cancelPendingAssignment(visitorId) {
   return watchdog.cancelVisitorAssignment(visitorId);
 }
 
-async function acceptTask(visitorId, driverId) {
-  const visitor = await prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
-  if (!visitor) throw ApiError.notFound('Visitor not found');
-  if (visitor.driverId !== driverId) throw ApiError.conflict('This pickup has already moved on', 'JOB_GONE');
-  assertTransition(visitor, ['pending'], 'accept');
-  if (visitor.acceptedAt) return visitor;
+// The visitor's park leg is a real ParkingTask under the hood (see
+// createVisitor) — these three delegate to task.service.js's own
+// accept/reject/key-collected instead of mutating the Visitor row directly,
+// so the linked task always stays in lockstep (task.service.js's functions
+// already call syncVisitorFromTask). Duplicating the mutation here instead
+// used to leave that task orphaned — open forever, invisible everywhere
+// except to the DB's one-active-job-per-driver index, which then blocked
+// this driver's next assignment. Same corruption class fixed elsewhere in
+// this file for assignment; this closes it for the rest of the lifecycle.
+async function findLinkedParkTask(visitorId) {
+  return prisma.parkingTask.findFirst({ where: { visitorId, type: 'park', isCurrent: true } });
+}
 
-  watchdog.disarm('visitor', visitorId);
-  const updated = await prisma.visitor.update({
-    where: { id: visitorId },
-    data: { acceptedAt: new Date(), trackingProgress: 0.35 },
-    include: visitorInclude,
-  });
-  cache.invalidate('visitors:');
-  emitVisitor(updated);
-  return updated;
+async function acceptTask(visitorId, driverId) {
+  const task = await findLinkedParkTask(visitorId);
+  if (!task) throw ApiError.conflict('This visitor has no parking job to accept', 'JOB_GONE');
+  await taskService().acceptTask(task.id, driverId);
+  return prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
 }
 
 // Driver: declined — immediate version of the accept-timeout rollback.
 async function rejectTask(visitorId, driverId) {
-  watchdog.disarm('visitor', visitorId);
-  const result = await runSerializable(async (tx) => {
-    const visitor = await tx.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
-    if (!visitor) throw ApiError.notFound('Visitor not found');
-    if (visitor.driverId !== driverId) throw ApiError.conflict('This pickup has already moved on', 'JOB_GONE');
-    assertTransition(visitor, ['pending'], 'reject');
-
-    const driverName = visitor.driver?.user?.name ?? 'Driver';
-    const updated = await tx.visitor.update({
-      where: { id: visitorId },
-      data: { driverId: null, driverAssignedAt: null, acceptedAt: null, trackingProgress: 0 },
-      include: visitorInclude,
-    });
-    await freeDriverIfStillOn(tx, driverId, visitorId);
-    return { updated, driverName };
-  });
-  cache.invalidate('visitors:');
-  cache.invalidate('drivers:');
-  emitVisitor(result.updated);
-  emitDriverPatch(driverId, 'available', null);
-  await jobAlerts.alertVisitorNeedsDriver(result.updated, result.driverName, { rejected: true });
-  return result.updated;
-}
-
-// Driver: physically collected the vehicle from the valet counter.
-async function markPickedUp(visitorId, driverId) {
-  const visitor = await prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
-  if (!visitor) throw ApiError.notFound('Visitor not found');
-  if (visitor.driverId !== driverId) throw ApiError.conflict('This pickup has already moved on', 'JOB_GONE');
-  assertTransition(visitor, ['pending'], 'mark picked up');
-
-  watchdog.disarm('visitor', visitorId);
+  const task = await findLinkedParkTask(visitorId);
+  if (!task) throw ApiError.conflict('This visitor has no parking job to reject', 'JOB_GONE');
+  await taskService().rejectTask(task.id, driverId);
+  // task.service.js's rejectTask doesn't sync the visitor mirror (it has no
+  // notion of visitors) — do it here, matching what syncVisitorFromTask
+  // would have done for a driverId rollback.
   const updated = await prisma.visitor.update({
     where: { id: visitorId },
-    data: { pickedUpAt: new Date(), acceptedAt: visitor.acceptedAt ?? new Date(), trackingProgress: 0.5 },
+    data: { driverId: null, driverAssignedAt: null, acceptedAt: null, trackingProgress: 0 },
     include: visitorInclude,
   });
   cache.invalidate('visitors:');
   emitVisitor(updated);
   return updated;
+}
+
+// Driver: physically collected the vehicle from the valet counter — the
+// visitor-flow equivalent of a valet tapping "Key handed over" for staff.
+async function markPickedUp(visitorId, driverId) {
+  const task = await findLinkedParkTask(visitorId);
+  if (!task) throw ApiError.conflict('This visitor has no parking job', 'JOB_GONE');
+  if (task.driverId !== driverId) throw ApiError.conflict('This pickup has already moved on', 'JOB_GONE');
+  await taskService().markKeyCollected(task.id);
+  return prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
 }
 
 // Valet: cancel a pending visitor (no-show, valet cancelled, parking failed).
@@ -465,72 +447,47 @@ async function cancelVisitor(visitorId, reason) {
   cache.invalidate('drivers:');
   emitVisitor(result.updated);
   if (result.freedDriverId) emitDriverPatch(result.freedDriverId, 'available', null);
+
+  // The check-in also created a linked ParkingTask (see createVisitor).
+  // Cancelling only the visitor left that task open forever — invisible
+  // everywhere except the DB's one-active-job-per-driver index, which then
+  // blocked this driver's next assignment. Best-effort and only when the
+  // task is still in a cancellable state (assertTransition inside
+  // taskService().cancelTask enforces this) — a task already past key
+  // handover means a driver is physically holding the car, which is a
+  // recall, not a cancel, and is left for the valet to handle explicitly.
+  const linkedTask = await findLinkedParkTask(visitorId);
+  if (linkedTask && ['requested', 'accepted', 'assigned'].includes(linkedTask.status)) {
+    await taskService().cancelTask(linkedTask.id).catch(() => {});
+  }
   return result.updated;
 }
 
-// Driver: car has been parked. Slot may be omitted — the backend then
-// auto-assigns the next free slot (what the app's park call relies on).
+// Driver: car has been parked — delegates to task.service.js's markParked
+// so the linked ParkingTask (see createVisitor) actually completes, the
+// slot claim and driver release happen in the one place staff jobs already
+// go through, instead of duplicating that logic here and leaving the task
+// orphaned open forever.
 async function markParked(visitorId, slotId) {
-  // The slot race is handled by the conditional claim below rather than by
-  // isolation level — see markParked in task.service.js for why escalating
-  // to Serializable here would collide with in-flight GPS writes.
-  const { visitor, slot } = await prisma.$transaction(async (tx) => {
-    const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
-    if (!existing) throw ApiError.notFound('Visitor not found');
-    assertTransition(existing, ['pending'], 'mark parked');
+  const task = await findLinkedParkTask(visitorId);
+  if (!task) throw ApiError.conflict('This visitor has no parking job', 'JOB_GONE');
 
-    // Conditional claim (`WHERE id = ? AND status = 'free'`) rather than
-    // read-then-write: it's atomic at Read Committed, so two concurrent
-    // auto-assigns can't both resolve to the same first free slot and both
-    // write it. On the auto-assign path a lost race just means trying the
-    // next candidate rather than failing the whole call.
-    let updatedSlot = null;
-    if (slotId) {
-      const exists = await tx.parkingSlot.findUnique({ where: { id: slotId } });
-      if (!exists) throw ApiError.badRequest(`Slot ${slotId} does not exist`);
-      const claimed = await tx.parkingSlot.updateMany({
-        where: { id: slotId, status: 'free' },
-        data: { status: 'occupied', carNumber: existing.carNumber },
-      });
-      if (claimed.count === 0) throw ApiError.conflict(`Slot ${slotId} is not free`);
-      updatedSlot = await tx.parkingSlot.findUnique({ where: { id: slotId } });
-    } else {
-      const candidates = await tx.parkingSlot.findMany({
-        where: { status: 'free' },
-        orderBy: [{ block: 'asc' }, { number: 'asc' }],
-        take: 10,
-      });
-      if (candidates.length === 0) throw ApiError.conflict('No free parking slots available');
-      for (const candidate of candidates) {
-        const claimed = await tx.parkingSlot.updateMany({
-          where: { id: candidate.id, status: 'free' },
-          data: { status: 'occupied', carNumber: existing.carNumber },
-        });
-        if (claimed.count > 0) {
-          updatedSlot = await tx.parkingSlot.findUnique({ where: { id: candidate.id } });
-          break;
-        }
-      }
-      if (!updatedSlot) throw ApiError.conflict('No free parking slots available');
-    }
-    const slot = updatedSlot;
-
-    await freeDriverIfStillOn(tx, existing.driverId, visitorId);
-
-    const updated = await tx.visitor.update({
-      where: { id: visitorId },
-      data: { slotId: slot.id, status: 'parked', trackingProgress: 1 },
-      include: visitorInclude,
+  // Slot may be omitted — auto-assign the next free one. task.service.js's
+  // own markParked always requires an explicit slot, so resolve one here
+  // first; its own atomic conditional claim (`WHERE status = 'free'`) still
+  // protects against losing a race for it.
+  let resolvedSlotId = slotId;
+  if (!resolvedSlotId) {
+    const candidate = await prisma.parkingSlot.findFirst({
+      where: { status: 'free' },
+      orderBy: [{ block: 'asc' }, { number: 'asc' }],
     });
-    return { visitor: updated, slot: updatedSlot };
-  });
-  cache.invalidate('visitors:');
-  cache.invalidate('slots:');
-  cache.invalidate('drivers:');
-  emitVisitor(visitor);
-  emitSlot(slot);
-  if (visitor.driverId) emitDriverPatch(visitor.driverId, 'available', null);
-  return visitor;
+    if (!candidate) throw ApiError.conflict('No free parking slots available');
+    resolvedSlotId = candidate.id;
+  }
+
+  await taskService().markParked(task.id, resolvedSlotId, task.driverId);
+  return prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
 }
 
 // Visitor (public, self-service from the tracking page): flags the parked
@@ -603,54 +560,47 @@ async function assignRetrievalDriver(visitorId, driverId, valetId) {
   return updated;
 }
 
-async function markRetrieved(visitorId) {
-  const { visitor, slot } = await runSerializable(async (tx) => {
-    const existing = await tx.visitor.findUnique({ where: { id: visitorId } });
-    if (!existing) throw ApiError.notFound('Visitor not found');
-    assertTransition(existing, ['parked'], 'mark retrieved');
-    if (!existing.retrievalRequested) throw ApiError.conflict('Retrieval has not been requested for this car');
-
-    // The slot recorded on the visitor is the authority for which slot this
-    // retrieval empties — requiring the plate to match too meant any drift
-    // in it (an edit, different spacing/case, or no plate captured at all)
-    // silently skipped the release and stranded that slot as permanently
-    // occupied with nothing able to free it again.
-    let freedSlot = null;
-    if (existing.slotId) {
-      const slot = await tx.parkingSlot.findUnique({ where: { id: existing.slotId } });
-      if (slot?.status === 'occupied') {
-        freedSlot = await tx.parkingSlot.update({ where: { id: existing.slotId }, data: { status: 'free', taskId: null, carNumber: null, doctorId: null } });
-      }
-    }
-
-    await freeDriverIfStillOn(tx, existing.driverId, visitorId);
-
-    const updated = await tx.visitor.update({
-      where: { id: visitorId },
-      // Not 'retrieved' yet — the valet still has to confirm the visitor
-      // actually came and took the car (see confirmDelivered below).
-      data: { status: 'delivered', retrievalRequested: false, trackingProgress: 0.95 },
-      include: visitorInclude,
-    });
-    return { visitor: updated, slot: freedSlot };
+function findLinkedRetrieveTask(visitorId) {
+  return prisma.parkingTask.findFirst({
+    where: { visitorId, type: 'retrieve', status: { notIn: ['completed', 'cancelled'] } },
+    orderBy: { createdAt: 'desc' },
   });
-  cache.invalidate('visitors:');
-  cache.invalidate('slots:');
-  cache.invalidate('drivers:');
-  emitVisitor(visitor);
-  if (slot) emitSlot(slot);
-  if (visitor.driverId) emitDriverPatch(visitor.driverId, 'available', null);
-  return visitor;
+}
+
+// Driver: "Car Delivered to Valet Counter" — delegates to task.service.js's
+// markRetrieved so the linked retrieve-type ParkingTask (see
+// assignRetrievalDriver) frees the slot/driver and reaches 'delivered' in
+// the one place staff jobs already go through.
+async function markRetrieved(visitorId) {
+  const task = await findLinkedRetrieveTask(visitorId);
+  if (!task) throw ApiError.conflict('This visitor has no retrieval job', 'JOB_GONE');
+  await taskService().markRetrieved(task.id, task.driverId);
+  return prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
 }
 
 // Valet: confirms the visitor actually came and took the car — the only
 // thing that finally closes out a retrieval, mirroring task.service.js's
-// confirmDelivered for staff/doctor tasks.
+// confirmDelivered for staff/doctor tasks. Delegates to it so the linked
+// retrieve task actually completes instead of only the Visitor mirror
+// moving — leaving that task stuck at 'delivered' forever was the same
+// corruption class fixed elsewhere in this file.
 async function confirmDelivered(visitorId) {
   const existing = await prisma.visitor.findUnique({ where: { id: visitorId } });
   if (!existing) throw ApiError.notFound('Visitor not found');
   assertTransition(existing, ['delivered'], 'confirm handed to owner');
 
+  const task = await prisma.parkingTask.findFirst({
+    where: { visitorId, type: 'retrieve', status: 'delivered' },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (task) {
+    await taskService().confirmDelivered(task.id);
+    return prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
+  }
+
+  // No linked task at 'delivered' (an older visitor from before this was
+  // wired up, or the task genuinely doesn't exist) — fall back to moving
+  // just the visitor row rather than failing the confirmation outright.
   const updated = await prisma.visitor.update({
     where: { id: visitorId },
     data: { status: 'retrieved', trackingProgress: 1 },
