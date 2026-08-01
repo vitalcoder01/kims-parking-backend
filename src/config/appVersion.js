@@ -2,8 +2,8 @@
 // versionCode/versionName) so the app can prompt users to update without
 // needing its own release to know about the new release.
 module.exports = {
-  latestVersionCode: 16,
-  latestVersionName: '1.7.2',
-  apkUrl: 'https://raw.githubusercontent.com/vitalcoder01/kims-parking-frontend/main/releases/KIMS-Parking-v1.7.2.apk',
-  notes: 'New app icon, the update prompt is now enforced before you can log in on an old build, and the app opens in light theme by default.',
+  latestVersionCode: 17,
+  latestVersionName: '1.7.3',
+  apkUrl: 'https://raw.githubusercontent.com/vitalcoder01/kims-parking-frontend/main/releases/KIMS-Parking-v1.7.3.apk',
+  notes: 'Fixed duplicate visitor/token cards, fixed a stuck "driver already assigned" error, and visitor jobs now show up on the queue immediately. New: Cancel Assign lets you free a driver who hasn\'t accepted yet without cancelling the whole job.',
 };
