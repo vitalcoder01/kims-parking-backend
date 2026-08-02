@@ -257,47 +257,67 @@ async function getVisitor(id) {
   return visitor;
 }
 
-// A double-tap on "Check In" (or a slow first request retried) otherwise
-// created two full Visitor rows — this path had no guard at all, client or
-// server, unlike createTask's equivalent for staff. Mirrors that guard:
-// return the existing check-in instead of creating a duplicate, but only
-// within a short window — a genuinely new visitor arriving later with the
-// same plate/mobile (a repeat guest) must still get their own token.
-const DUPLICATE_TAP_MS = 2 * 60 * 1000;
-
+// A double-tap on "Check In" (or two valet devices checking in the same
+// walk-in within the same moment) otherwise created two full Visitor rows —
+// this path had no guard at all, client or server, unlike createTask's
+// equivalent for staff. The fast-path check below is a courtesy (returns the
+// existing check-in without round-tripping through an error); the real
+// guarantee is the DB-level partial unique index on (carNumber, mobile)
+// WHERE status = 'pending' (see migration 20260802030000), which makes it
+// impossible for two pending rows with the same car+mobile to exist at all —
+// closing the race the old time-window check couldn't. A genuinely new visit
+// for the same car+mobile is only blocked while an earlier one is still
+// unresolved, which is correct: that earlier one needs cancelling first, not
+// silently duplicated.
 async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) {
   const normalizedCarNumber = carNumber ? String(carNumber).trim().toUpperCase().replace(/\s+/g, ' ') : '';
   const normalizedMobile = mobile.trim();
 
-  const recent = await prisma.visitor.findFirst({
+  const existing = await prisma.visitor.findFirst({
     where: { carNumber: normalizedCarNumber, mobile: normalizedMobile, status: 'pending' },
     orderBy: { createdAt: 'desc' },
     include: visitorInclude,
   });
-  if (recent && Date.now() - recent.createdAt.getTime() < DUPLICATE_TAP_MS) {
-    return recent;
-  }
+  if (existing) return existing;
 
-  const visitor = await prisma.visitor.create({
-    data: {
-      // Name is optional: a visitor who won't give one still needs a token,
-      // and refusing the check-in over it helps nobody. Stored as '' rather
-      // than null so every reader sees a string.
-      name: (name ?? '').trim(),
-      // Required at intake (see visitor.controller create) — it is how the
-      // car is found later. Normalised so the same car typed three different
-      // ways matches itself in search.
-      carNumber: normalizedCarNumber,
-      mobile: normalizedMobile,
-      vehicleType: vehicleType === 'bike' ? 'bike' : 'car',
-      token: generateToken(),
-      status: 'pending',
-      // The valet who registered this visitor owns the job.
-      valetId: valetId ?? null,
-      valetClaimedAt: valetId ? new Date() : null,
-    },
-    include: visitorInclude,
-  });
+  let visitor;
+  try {
+    visitor = await prisma.visitor.create({
+      data: {
+        // Name is optional: a visitor who won't give one still needs a token,
+        // and refusing the check-in over it helps nobody. Stored as '' rather
+        // than null so every reader sees a string.
+        name: (name ?? '').trim(),
+        // Required at intake (see visitor.controller create) — it is how the
+        // car is found later. Normalised so the same car typed three different
+        // ways matches itself in search.
+        carNumber: normalizedCarNumber,
+        mobile: normalizedMobile,
+        vehicleType: vehicleType === 'bike' ? 'bike' : 'car',
+        token: generateToken(),
+        status: 'pending',
+        // The valet who registered this visitor owns the job.
+        valetId: valetId ?? null,
+        valetClaimedAt: valetId ? new Date() : null,
+      },
+      include: visitorInclude,
+    });
+  } catch (err) {
+    // Lost the race that the fast-path check above couldn't catch — a
+    // concurrent request's insert won between our SELECT and our INSERT.
+    // P2002 here can only mean the partial unique index, so the winner's row
+    // is exactly what we'd otherwise have returned had we checked a moment
+    // later.
+    if (err.code === 'P2002') {
+      const winner = await prisma.visitor.findFirst({
+        where: { carNumber: normalizedCarNumber, mobile: normalizedMobile, status: 'pending' },
+        orderBy: { createdAt: 'desc' },
+        include: visitorInclude,
+      });
+      if (winner) return winner;
+    }
+    throw err;
+  }
   // The visitor's parking job is a real ParkingTask, exactly like a staff
   // member's. That is what puts it on the driver's normal job card with the
   // normal actions, instead of a separate "visitor pickup" shape that had to
