@@ -69,16 +69,6 @@ function isRetrievalOpenToAll(task) {
   return task.recoveryBroadcastAt != null || task.escalatedAt != null;
 }
 
-// A departure booked for later is informational until its lead time is
-// reached. Hiding the buttons is not enough on its own — a client holding a
-// stale card, or one that never refreshed, would still be able to call the
-// endpoint. This is the server-side half of that rule.
-function isRetrievalScheduled(task) {
-  if (task.type !== 'retrieve') return false;
-  if (task.retrievalReadyAt == null) return false;   // pre-scheduling row
-  return new Date(task.retrievalReadyAt).getTime() > Date.now();
-}
-
 function isVisibleToValet(task, valetId) {
   if (task.type !== 'retrieve') return true;
   const owner = task.retrievalOwnerValetId ?? task.arrivalOwnerValetId;
@@ -1292,7 +1282,6 @@ module.exports = {
   syncVisitorFromTask,
   ownerLabel,
   isVisibleToValet,
-  isRetrievalScheduled,
   notifyRetrievalOwner,
   // Exported so the scheduler sweep emits through the SAME ownership-aware
   // path, rather than re-implementing who is allowed to see a retrieval.

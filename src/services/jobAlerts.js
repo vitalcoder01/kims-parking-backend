@@ -263,14 +263,14 @@ async function releaseUnansweredRetrievals() {
 // guard as arrival accept: the loser's UPDATE matches zero rows, so the
 // database decides, not whose tap reached the server on a faster network.
 async function claimRetrieval(taskId, valetId) {
-  // Same rule as assignDriver: a scheduled departure cannot be accepted
-  // early, whoever is asking. Checked before the claim so the answer is the
-  // honest reason rather than a generic "no longer available".
-  const pre = await prisma.parkingTask.findUnique({ where: { id: taskId } });
-  if (pre && taskService().isRetrievalScheduled(pre)) {
-    throw ApiError.conflict('This departure is scheduled for later and is not ready yet', 'NOT_READY');
-  }
-
+  // No early-claim block here (there used to be one, mirroring assignDriver's
+  // old NOT_READY guard) — a valet who opens the inbox and taps a scheduled
+  // request is making the same deliberate early call assignDriver already
+  // allows; leaving this one in place meant a doctor/staff departure with a
+  // planned time still hit "not ready yet" (surfaced to the valet as this
+  // job's generic "already accepted" dialog) even though assignDriver itself
+  // would have accepted the assignment. The lead time still governs only the
+  // automatic alert (see promoteScheduledRetrievals below).
   const claimed = await prisma.parkingTask.updateMany({
     where: {
       id: taskId,
