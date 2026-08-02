@@ -557,12 +557,13 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
           throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
         }
 
-        // Not yet due. Refused for everyone, owner included: the whole point
-        // of a lead time is that work starts then, not whenever a card
-        // happens to be tapped.
-        if (existing.type === 'retrieve' && isRetrievalScheduled(existing)) {
-          throw ApiError.conflict('This departure is scheduled for later and is not ready yet', 'NOT_READY');
-        }
+        // A valet who proactively checks the inbox can assign ahead of the
+        // lead time if they want to — the lead time still governs when the
+        // AUTOMATIC alert fires (see jobAlerts.js promoteScheduledRetrievals,
+        // gated on driverId: null), it no longer blocks a deliberate early
+        // assignment. Once assigned here, driverId is no longer null, so the
+        // sweep simply skips this row when it later reaches readyAt — no
+        // double-alert.
 
         // Session ownership, enforced on the write path rather than only in
         // what each valet is shown — a client holding a stale card must not
