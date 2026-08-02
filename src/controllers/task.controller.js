@@ -74,6 +74,21 @@ const assignDriver = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Valet: "Request retrieval" on behalf of a staff/doctor member who called
+// the desk instead of using their own app — raises the request (if one isn't
+// already live) and assigns a driver in one tap, mirroring visitor.service.js
+// assignRetrievalDriver.
+const assignRetrievalDriverForDoctor = asyncHandler(async (req, res) => {
+  const { driverId, lat, lng } = req.body;
+  if (!driverId) throw ApiError.badRequest('driverId is required');
+
+  const valetLocation = typeof lat === 'number' && typeof lng === 'number' ? { lat, lng } : null;
+  const task = await taskService.assignRetrievalDriverForDoctor(
+    parseId(req.params.doctorId), parseId(driverId), valetLocation, req.user.id,
+  );
+  res.json({ task: serializeTask(task) });
+});
+
 // Valet: give up on a driver who hasn't accepted this job yet, right now,
 // instead of waiting out the accept-timeout window.
 const cancelAssignment = asyncHandler(async (req, res) => {
@@ -189,4 +204,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };

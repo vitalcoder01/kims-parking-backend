@@ -496,6 +496,24 @@ async function requestRetrieval({ doctorId, visitorId, plannedDepartureMinutes }
   return task;
 }
 
+// Valet: the doctor/staff equivalent of visitor.service.js's
+// assignRetrievalDriver — a staff member who calls the desk instead of using
+// their own app shouldn't need the valet to wait for a self-service request
+// that's never coming. Pressing "Request retrieval" IS the request: lazily
+// raises it (via requestRetrieval, "now" as the honest planned departure) if
+// one doesn't already exist, then assigns straight through the same
+// assignDriver every other job uses — no separate request/assign steps.
+async function assignRetrievalDriverForDoctor(doctorId, driverId, valetLocation, valetId) {
+  let task = await prisma.parkingTask.findFirst({
+    where: { doctorId, type: 'retrieve', status: { notIn: ['completed', 'cancelled'] } },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!task) {
+    task = await requestRetrieval({ doctorId, plannedDepartureMinutes: 0 });
+  }
+  return assignDriver(task.id, driverId, valetLocation, valetId);
+}
+
 // Valet: assigns an available driver to a requested (or already-assigned,
 // e.g. reassigning) task.
 async function assignDriver(taskId, driverId, valetLocation, valetId) {
@@ -1279,6 +1297,7 @@ module.exports = {
   getTask,
   createTask,
   requestRetrieval,
+  assignRetrievalDriverForDoctor,
   assignDriver,
   cancelPendingAssignment,
   acceptTask,

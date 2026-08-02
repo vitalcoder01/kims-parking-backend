@@ -11,6 +11,11 @@ router.get('/:id', ctrl.get);
 router.post('/', requireRole('valet', 'admin'), ctrl.create);
 router.post('/request-retrieval', requireRole('doctor', 'staff', 'admin'), ctrl.requestRetrieval);
 router.patch('/:id/assign', requireRole('valet', 'admin'), ctrl.assignDriver);
+// Valet: "Request retrieval" on behalf of a staff/doctor member (they called
+// the desk instead of using their own app) — raises the request and assigns
+// a driver in one step, the staff/doctor equivalent of visitors'
+// PATCH /visitors/:id/assign-retrieval.
+router.patch('/doctor/:doctorId/assign-retrieval', requireRole('valet', 'admin'), ctrl.assignRetrievalDriverForDoctor);
 // Valet gives up on a driver who hasn't accepted yet — right now, instead of
 // waiting out the accept-timeout window. Frees the driver, job stays open.
 router.patch('/:id/cancel-assignment', requireRole('valet', 'admin'), ctrl.cancelAssignment);
