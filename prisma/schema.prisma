@@ -18,6 +18,11 @@ model User {
   carNumber           String?
   carModel            String?
   carColor            String?
+  // The doctor/staff member's OWN vehicle type — separate from Visitor's
+  // vehicleType (a different person's car). Nullable/no default: an
+  // existing account with a car on file shouldn't silently become "car" by
+  // migration when nobody actually chose that.
+  vehicleType         VehicleType?
   phone               String?
   // Admin-created accounts are pre-vetted by the admin who typed them in, so
   // they default to already approved. Self-registered accounts start
