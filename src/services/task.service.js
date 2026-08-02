@@ -96,7 +96,11 @@ function isVisibleToValet(task, valetId) {
  * One direction only: nothing writes back from Visitor to the task.
  *
  * Called after a transition rather than inside it, so a mirroring failure can
- * never roll back the real work the driver just did.
+ * never roll back the real work the driver just did — every call site still
+ * `.catch`es and awaits the settled (never-rejecting) promise, not to gate
+ * the transition on it, but so callers that immediately re-read the Visitor
+ * row (visitor.service.js's confirmDelivered et al) don't win a race against
+ * their own mirror write and hand the caller a not-yet-updated row.
  */
 async function syncVisitorFromTask(task) {
   if (!task?.visitorId) return;
@@ -746,7 +750,7 @@ async function acceptTask(taskId, driverId) {
   watchdog.disarm('task', taskId);
   cache.invalidate('tasks:');
   emitTask(task);
-  syncVisitorFromTask(task).catch(() => {});
+  await syncVisitorFromTask(task).catch(() => {});
   return task;
 }
 
@@ -809,7 +813,7 @@ async function markKeyCollected(taskId) {
   // Key handed over means the assignment is definitively taken.
   watchdog.disarm('task', taskId);
   emitTask(updated);
-  syncVisitorFromTask(updated).catch(() => {});
+  await syncVisitorFromTask(updated).catch(() => {});
   return updated;
 }
 
@@ -844,7 +848,7 @@ async function markInTransit(taskId, driverId) {
   cache.invalidate('tasks:');
   watchdog.disarm('task', taskId);
   emitTask(updated);
-  syncVisitorFromTask(updated).catch(() => {});
+  await syncVisitorFromTask(updated).catch(() => {});
   return updated;
 }
 
@@ -904,7 +908,7 @@ async function markParked(taskId, slotId, driverId) {
   emitTask(task);
   emitSlot(slot);
   if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
-  syncVisitorFromTask(task).catch(() => {});
+  await syncVisitorFromTask(task).catch(() => {});
   return task;
 }
 
@@ -957,7 +961,7 @@ async function markRetrieved(taskId, driverId) {
   emitTask(task);
   if (slot) emitSlot(slot);
   if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
-  syncVisitorFromTask(task).catch(() => {});
+  await syncVisitorFromTask(task).catch(() => {});
 
   // The one moment in a retrieval that the doctor actually has to act on:
   // their car is downstairs. Everything earlier in the journey (a valet took
@@ -1008,7 +1012,7 @@ async function confirmDelivered(taskId) {
   });
   cache.invalidate('tasks:');
   emitTask(updated);
-  syncVisitorFromTask(updated).catch(() => {});
+  await syncVisitorFromTask(updated).catch(() => {});
   return updated;
 }
 
