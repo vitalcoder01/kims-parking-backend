@@ -23,6 +23,25 @@ app.use(compression());
 app.use(express.json({ limit: '256kb' }));
 app.use(morgan(NODE_ENV === 'production' ? 'combined' : 'dev'));
 
+// Temporary diagnostic for the "stays slow throughout use" latency reports —
+// an X-Response-Time header (server processing time only, not network/DNS/
+// TLS) is visible in any browser's DevTools Network tab with zero extra
+// tooling, so it's the fastest way to tell "is the server actually slow, or
+// is the time going somewhere else (network, client rendering)". Safe to
+// remove once that's confirmed.
+app.use((req, res, next) => {
+  const startedAt = process.hrtime.bigint();
+  const originalEnd = res.end;
+  res.end = function patchedEnd(...args) {
+    if (!res.headersSent) {
+      const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      res.setHeader('X-Response-Time', `${ms.toFixed(1)}ms`);
+    }
+    return originalEnd.apply(res, args);
+  };
+  next();
+});
+
 // Baseline abuse guard for the whole API — generous enough that the app's
 // own ~4s polling (several requests per tick, per device) never comes close,
 // but stops a runaway client or scripted abuse from hammering the DB.
