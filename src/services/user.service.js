@@ -218,12 +218,66 @@ async function deleteUser(id) {
   }
 }
 
-// Self-service — a user updating their own car details/phone, not an admin
-// editing someone else's account (see updateUser for that, admin-only).
-async function updateOwnProfile(id, { carNumber, phone, carModel, carColor, vehicleType }) {
+// Display-name rules — deliberately lenient on script (any language's
+// letters via \p{L}), strict on length and on unusual characters that would
+// only ever appear from a paste of markup / control chars / emoji spam.
+function validateDisplayName(name) {
+  const trimmed = (name ?? '').trim();
+  if (trimmed.length < 2) throw ApiError.badRequest('Name must be at least 2 characters');
+  if (trimmed.length > 64) throw ApiError.badRequest('Name must be 64 characters or fewer');
+  if (!/^[\p{L}\p{M} .'\-]+$/u.test(trimmed)) {
+    throw ApiError.badRequest("Name can only contain letters, spaces, and . ' -");
+  }
+  if (/\s{2,}/.test(trimmed)) throw ApiError.badRequest('Name cannot contain consecutive spaces');
+  return trimmed;
+}
+
+// Login-name rules. Broader than a display name (allows digits) but the
+// same "no control chars, no consecutive whitespace, no leading/trailing
+// whitespace" hygiene — plus a case-insensitive uniqueness check the caller
+// runs against the DB. Deliberately does NOT allow slashes/angle brackets
+// so a username can never masquerade as a URL fragment when it appears in
+// notification bodies or log lines.
+function validateUsername(username) {
+  const trimmed = (username ?? '').trim();
+  if (trimmed.length < 3) throw ApiError.badRequest('Username must be at least 3 characters');
+  if (trimmed.length > 40) throw ApiError.badRequest('Username must be 40 characters or fewer');
+  if (!/^[\p{L}\p{N} .]+$/u.test(trimmed)) {
+    throw ApiError.badRequest('Username can only contain letters, numbers, spaces, and dots');
+  }
+  if (/\s{2,}/.test(trimmed)) throw ApiError.badRequest('Username cannot contain consecutive spaces');
+  return trimmed;
+}
+
+// Self-service — a user updating their own profile: car details, phone,
+// display name, or login username. NOT password (see changeOwnPassword,
+// which re-authenticates first) and NOT role/employeeId (admin-only via
+// updateUser).
+async function updateOwnProfile(id, { carNumber, phone, carModel, carColor, vehicleType, name, username }) {
   if (vehicleType !== undefined && vehicleType !== null && vehicleType !== 'car' && vehicleType !== 'bike') {
     throw ApiError.badRequest('vehicleType must be car or bike');
   }
+  const validatedName = name !== undefined ? validateDisplayName(name) : undefined;
+  const validatedUsername = username !== undefined ? validateUsername(username) : undefined;
+
+  // Uniqueness on username — case-insensitive, excluding the caller's own row
+  // (so a no-op save doesn't false-positive against itself). Checked BEFORE
+  // the update so the error message names the conflict rather than surfacing
+  // as a raw Prisma P2002.
+  if (validatedUsername !== undefined) {
+    const existing = await prisma.user.findUnique({ where: { id } });
+    if (!existing) throw ApiError.notFound('User not found');
+    if (existing.username?.toLowerCase() !== validatedUsername.toLowerCase()) {
+      const taken = await prisma.user.findFirst({
+        where: {
+          username: { equals: validatedUsername, mode: 'insensitive' },
+          id: { not: id },
+        },
+      });
+      if (taken) throw ApiError.conflict('This username is already taken');
+    }
+  }
+
   const updated = await prisma.user.update({
     where: { id },
     data: {
@@ -232,6 +286,8 @@ async function updateOwnProfile(id, { carNumber, phone, carModel, carColor, vehi
       ...(carModel !== undefined && { carModel: carModel?.trim() || null }),
       ...(carColor !== undefined && { carColor: carColor?.trim() || null }),
       ...(vehicleType !== undefined && { vehicleType: vehicleType || null }),
+      ...(validatedName !== undefined && { name: validatedName }),
+      ...(validatedUsername !== undefined && { username: validatedUsername }),
     },
     include: { driver: true },
   });
@@ -259,6 +315,40 @@ async function updateOwnProfile(id, { carNumber, phone, carModel, carColor, vehi
   }
 
   return updated;
+}
+
+// Self-service — a user changing THEIR OWN password. Distinct from
+// resetPassword (admin-forced reset, no old password needed): this always
+// re-authenticates with the current password first, so a stolen session
+// token alone cannot lock the real user out by rotating their credentials.
+//
+// Timing/observability guards:
+//  - existence and current-password checks BOTH surface as the same 401
+//    ("current password is incorrect"), so a caller can't learn from timing
+//    or wording whether an account exists but has a different password (a
+//    non-issue for a self-endpoint since the JWT already names the user,
+//    but the same message is still the right shape).
+//  - bcrypt.compare is constant-time-ish by design; keep it.
+async function changeOwnPassword(id, currentPassword, newPassword) {
+  if (typeof currentPassword !== 'string' || !currentPassword) {
+    throw ApiError.badRequest('Current password is required');
+  }
+  if (typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 64) {
+    throw ApiError.badRequest('New password must be 8–64 characters');
+  }
+  if (currentPassword === newPassword) {
+    throw ApiError.badRequest('New password must be different from the current one');
+  }
+
+  const user = await prisma.user.findUnique({ where: { id } });
+  if (!user) throw ApiError.unauthorized('Current password is incorrect');
+
+  const valid = await bcrypt.compare(currentPassword, user.password);
+  if (!valid) throw ApiError.unauthorized('Current password is incorrect');
+
+  const passwordHash = await bcrypt.hash(newPassword, 10);
+  await prisma.user.update({ where: { id }, data: { password: passwordHash } });
+  invalidateUserCache(id);
 }
 
 // Public, unauthenticated — a doctor/staff member creating their own login
@@ -329,4 +419,4 @@ async function updateOwnDesignation(id, role) {
   return updated;
 }
 
-module.exports = { findByCardCode, listUsers, createUser, updateUser, resetPassword, deleteUser, updateOwnProfile, selfRegister, updateOwnDesignation };
+module.exports = { findByCardCode, listUsers, createUser, updateUser, resetPassword, deleteUser, updateOwnProfile, changeOwnPassword, selfRegister, updateOwnDesignation };
