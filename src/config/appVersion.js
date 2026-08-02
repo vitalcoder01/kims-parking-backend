@@ -2,8 +2,8 @@
 // versionCode/versionName) so the app can prompt users to update without
 // needing its own release to know about the new release.
 module.exports = {
-  latestVersionCode: 28,
-  latestVersionName: '1.8.4',
-  apkUrl: 'https://raw.githubusercontent.com/vitalcoder01/kims-parking-frontend/main/releases/KIMS-Parking-v1.8.4.apk',
-  notes: 'Fixed a visitor ticket briefly reappearing after confirming handover, fixed a staff retrieval request being mislabeled as already having a driver, and fixed "already taken" errors when assigning a driver to a scheduled staff/doctor retrieval — valets can now assign a driver to any retrieval request as soon as it comes in.',
+  latestVersionCode: 29,
+  latestVersionName: '1.8.5',
+  apkUrl: 'https://raw.githubusercontent.com/vitalcoder01/kims-parking-frontend/main/releases/KIMS-Parking-v1.8.5.apk',
+  notes: 'Fixed the in-app update download failing with "Download interrupted" on a weak connection — it now uses Android\'s own download manager, which resumes instead of restarting from scratch. Also redesigned the in-app notification into a floating, swipeable card.',
 };
