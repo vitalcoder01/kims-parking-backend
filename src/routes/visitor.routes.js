@@ -21,6 +21,8 @@ router.patch('/:id/accept', requireRole('driver', 'admin'), ctrl.accept);
 router.patch('/:id/reject', requireRole('driver', 'admin'), ctrl.reject);
 router.patch('/:id/pickup', requireRole('driver', 'admin'), ctrl.pickup);
 router.patch('/:id/cancel', requireRole('valet', 'admin'), ctrl.cancel);
+// Key's already with a driver — "bring my car back" instead of a cancel.
+router.patch('/:id/recall', requireRole('valet', 'admin'), ctrl.recall);
 router.patch('/:id/park', requireRole('driver', 'admin'), ctrl.park);
 // Valet desk: raise a retrieval for a visitor standing at the counter. The
 // visitor cannot do this themselves — there is no public equivalent.

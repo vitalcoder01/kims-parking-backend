@@ -98,6 +98,13 @@ const cancel = asyncHandler(async (req, res) => {
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
+// Valet: "Bring my car back" — the key is already with a driver, so this
+// isn't a cancel/no-show anymore (see visitor.service.js's recallVisitor).
+const recall = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.recallVisitor(parseId(req.params.id));
+  res.json({ visitor: serializeVisitor(visitor) });
+});
+
 const update = asyncHandler(async (req, res) => {
   const visitor = await visitorService.updateVisitor(parseId(req.params.id), req.body);
   res.json({ visitor: serializeVisitor(visitor) });
@@ -169,4 +176,4 @@ const track = asyncHandler(async (req, res) => {
 });
 
 
-module.exports = { search, requestVisitorRetrieval, suggestPlates, list, create, update, assignDriver, cancelAssignment, accept, reject, pickup, cancel, park, assignRetrievalDriver, retrieve, confirmDelivered, track };
+module.exports = { search, requestVisitorRetrieval, suggestPlates, list, create, update, assignDriver, cancelAssignment, accept, reject, pickup, cancel, recall, park, assignRetrievalDriver, retrieve, confirmDelivered, track };

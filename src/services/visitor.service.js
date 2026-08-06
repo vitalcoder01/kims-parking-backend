@@ -503,6 +503,23 @@ async function cancelVisitor(visitorId, reason) {
   return result.updated;
 }
 
+// Valet: "Bring my car back" — the visitor-flow counterpart to the recall
+// already available for staff (see task.service.js's recallTask). This is
+// exactly the gap flagged in cancelVisitor's comment above: once a driver
+// has the key, the check-in can no longer be cancelled/no-showed (the car
+// is physically gone), and until now there was nothing else on offer here
+// either. Delegates entirely to taskService().recallTask, which already
+// handles the driver notification and the key_collected/in_transit-only
+// guard — the visitor row itself doesn't need its own recalledAt mirror
+// since the frontend reads the linked task (visitorId is on ParkingTask)
+// for that state.
+async function recallVisitor(visitorId) {
+  const task = await findLinkedParkTask(visitorId);
+  if (!task) throw ApiError.conflict('This visitor has no parking job to recall', 'JOB_GONE');
+  await taskService().recallTask(task.id);
+  return prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
+}
+
 // Driver: car has been parked — delegates to task.service.js's markParked
 // so the linked ParkingTask (see createVisitor) actually completes, the
 // slot claim and driver release happen in the one place staff jobs already
@@ -670,7 +687,7 @@ module.exports = {
   suggestPlates,
   normalisePlate,
   listVisitors, getVisitor, createVisitor, updateVisitor,
-  assignDriver, cancelPendingAssignment, acceptTask, rejectTask, markPickedUp, cancelVisitor,
+  assignDriver, cancelPendingAssignment, acceptTask, rejectTask, markPickedUp, cancelVisitor, recallVisitor,
   markParked, requestRetrieval, assignRetrievalDriver, markRetrieved, confirmDelivered,
   trackByPublicToken,
   // Back-compat alias for existing callers (track page controller).

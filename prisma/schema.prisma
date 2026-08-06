@@ -207,6 +207,13 @@ model ParkingTask {
   @@index([doctorId])
   @@index([doctorId, createdAt])
   @@index([driverId])
+  // The driver app's "completed today" / history fetch is WHERE driverId = ?
+  // ORDER BY createdAt DESC — same shape as the doctorId composite above,
+  // just missing. Without it Postgres has only the plain driverId index to
+  // filter with, then sorts the matches in memory; a driver with months of
+  // history turns that into a real full-scan-and-sort on every fetch, which
+  // is what made the driver app's job screens feel slow to load.
+  @@index([driverId, createdAt])
   @@index([status])
   @@index([createdAt])
   @@index([slotId])
