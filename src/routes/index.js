@@ -25,6 +25,7 @@ router.use('/notifications', require('./notification.routes'));
 router.use('/arrivals', require('./arrivalNotice.routes'));
 router.use('/attendance', require('./attendance.routes'));
 router.use('/admin', require('./admin.routes'));
+router.use('/analytics', require('./analytics.routes'));
 router.use('/track', require('./track.routes'));
 
 // Verifies the DB is actually reachable, not just that the process is up —
