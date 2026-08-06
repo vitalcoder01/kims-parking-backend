@@ -79,6 +79,9 @@ async function overview() {
     avgParkMinutes: avgMinutes(parkTasks, 'keyCollectedAt', 'completedAt'),
     avgRetrieveMinutes: avgMinutes(retrieveTasks, 'assignedAt', 'completedAt'),
     busiestHour,
+    // Full 24-slot histogram, not just the peak — lets the UI draw a real
+    // hour-by-hour chart instead of a single "6 AM" data point.
+    hourlyDistribution: hourCounts,
     visitorJobs: completedTasks.filter(t => t.visitorId != null).length,
     staffJobs: completedTasks.filter(t => t.visitorId == null).length,
     drivers,
