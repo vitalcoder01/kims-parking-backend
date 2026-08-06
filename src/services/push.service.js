@@ -101,13 +101,13 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, data 
   // show anything. That is fine while the app is merely backgrounded, but a
   // swiped-away app is treated as force-stopped by most OEM Androids
   // (Xiaomi/MIUI, Oppo, Vivo, Realme, Samsung), and force-stopped apps never
-  // receive data-only pushes — so the notification silently never appeared.
+  // receive data-only pushes — Android won't launch a force-stopped app's
+  // broadcast receivers, full stop — so the notification silently never
+  // appeared.
   //
-  // A `notification` block is rendered by the Android system itself, with no
-  // app code running at all, which is the only thing that survives a killed
-  // app. Alarms deliberately stay data-only: they need notifee to raise the
-  // full-screen ringing alarm, and a system-rendered copy alongside it would
-  // just be the same message twice.
+  // A `notification` block is rendered by Play Services itself, in ITS OWN
+  // process, not the app's — that survives a killed/force-stopped app,
+  // which is why the non-alarm path below already uses one.
   const isAlarm = type === 'alarm';
   const message = {
     tokens: tokens.map(t => t.token),
@@ -118,10 +118,11 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, data 
       ttl: 5 * 60 * 1000,
       ...(isAlarm ? {} : {
         notification: {
-          // Without this the app manifest's default channel applies, which is
-          // the loud ring channel — a doctor's "Car Parked" would ring like a
-          // job alarm.
-          channelId: 'kims_parking',
+          // v2: the original channel was created with no explicit sound —
+          // silent on several Android builds, and channels are immutable
+          // after creation, so this has to be a fresh id to actually reach
+          // installs that already made the v1 one. See notifications.ts.
+          channelId: 'kims_parking_v2',
           // Same identity the in-app path uses, so a repeat delivery replaces
           // the entry instead of stacking a second one.
           ...(notifId != null ? { tag: `kims-notif-${notifId}` } : {}),
@@ -130,9 +131,35 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, data 
     },
   };
 
-  try {
-    const res = await m.sendEachForMulticast(message);
-    // Prune tokens FCM says are dead so the table doesn't grow stale forever.
+  // Alarms stay data-only in the message above ON PURPOSE — adding a
+  // `notification` block to THAT message would make Android auto-display a
+  // plain system notification instead of invoking the background handler at
+  // all while merely backgrounded (not killed), silently downgrading the
+  // rich full-screen ring to a generic tray entry for the common case.
+  //
+  // But that leaves a genuinely killed/force-stopped app with nothing —
+  // exactly the "kill state" gap this was missing. So alarms ALSO get a
+  // second, separate, notification-only message: Play Services renders this
+  // one by itself regardless of app state, so it's the one thing that still
+  // reaches a force-stopped app. It rides the SAME channel id notifee's
+  // ringAssignmentAlarm uses on-device, so on the rare device where both
+  // land (backgrounded-but-alive), it still rings with that channel's real
+  // alarm sound/vibration rather than a silent generic one — not a literal
+  // duplicate-suppression, but never worse than the loud ring either way.
+  const fallbackMessage = isAlarm ? {
+    tokens: tokens.map(t => t.token),
+    notification: { title, body },
+    android: {
+      priority: 'high',
+      ttl: 5 * 60 * 1000,
+      notification: {
+        channelId: 'kims_parking_ring_v2',
+        ...(notifId != null ? { tag: `kims-notif-${notifId}` } : {}),
+      },
+    },
+  } : null;
+
+  const pruneDead = async (res) => {
     const dead = [];
     res.responses.forEach((r, i) => {
       const code = r.error?.code;
@@ -141,6 +168,15 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, data 
       }
     });
     if (dead.length) await prisma.deviceToken.deleteMany({ where: { token: { in: dead } } });
+  };
+
+  try {
+    const res = await m.sendEachForMulticast(message);
+    await pruneDead(res);
+    if (fallbackMessage) {
+      const fbRes = await m.sendEachForMulticast(fallbackMessage);
+      await pruneDead(fbRes);
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[push] send failed:', err.message);
