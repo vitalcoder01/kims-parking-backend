@@ -107,6 +107,16 @@ async function syncVisitorFromTask(task) {
       data.slotId = task.slotId;
       data.trackingProgress = 1;
     }
+    // A recalled park job's OTHER terminal outcome (see confirmDelivered):
+    // the car never got parked, it went back to the counter and the valet
+    // confirmed receipt. Without this the visitor row was left stranded at
+    // 'pending' forever — no live job, no way to tell it apart from a
+    // genuine still-in-progress check-in, and no way to close the token.
+    if (task.status === 'cancelled' && task.recalledAt) {
+      data.status = 'cancelled';
+      data.cancelledAt = task.completedAt ?? new Date();
+      data.cancelReason = 'valet_cancelled';
+    }
   } else if (task.type === 'retrieve') {
     if (task.driverId != null) data.driverId = task.driverId;
     if (task.status === 'delivered') data.status = 'delivered';
