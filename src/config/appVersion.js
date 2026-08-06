@@ -2,8 +2,8 @@
 // versionCode/versionName) so the app can prompt users to update without
 // needing its own release to know about the new release.
 module.exports = {
-  latestVersionCode: 37,
-  latestVersionName: '1.9.3',
-  apkUrl: 'https://raw.githubusercontent.com/vitalcoder01/kims-parking-frontend/main/releases/KIMS-Parking-v1.9.3.apk',
-  notes: 'New premium Analytics tab for valet & admin — all-time stats, rated park/retrieve performance, a tap-to-inspect 24-hour activity chart, driver leaderboard with crowns, and one-tap Share Report. Plus a matching visual upgrade to the Dashboard tab.',
+  latestVersionCode: 38,
+  latestVersionName: '1.9.4',
+  apkUrl: 'https://raw.githubusercontent.com/vitalcoder01/kims-parking-frontend/main/releases/KIMS-Parking-v1.9.4.apk',
+  notes: 'My Jobs now opens on In Progress. Accept/Reject show a clear "working…" state. Retrieval tickets are labelled (vehicle vs. requester). And once a driver has your car, the ticket now offers "Bring back my car" instead of a stale Cancel/No-Show.',
 };
