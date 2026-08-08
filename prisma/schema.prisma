@@ -137,6 +137,16 @@ model ParkingTask {
   // marks it returned (-> delivered) and the valet confirms (-> cancelled),
   // the same two-step handshake a retrieval already uses.
   recalledAt        DateTime?
+  // Repeating "still needs a driver" reminder for a freshly-created park
+  // ticket (staff key-collection or a visitor check-in — both are this same
+  // table, see createTask/createVisitor) — a genuinely separate mechanism
+  // from the escalatedAt/valetClaimedAt ladder above, which is a ONE-TIME
+  // grace-period escalation used for retrieval requests and driver
+  // rejections. This one fires every 60s to the owning valet until either a
+  // driver is assigned (driverId no longer null, which already falls out of
+  // the sweep's own WHERE clause) or they explicitly silence it.
+  lastDriverReminderAt     DateTime?
+  driverReminderSilencedAt DateTime?
   // One doctor/staff member ever has at most one row with isCurrent=true —
   // enforced by a partial unique index (see the manual migration SQL,
   // Prisma's schema DSL can't express a WHERE-qualified unique constraint).

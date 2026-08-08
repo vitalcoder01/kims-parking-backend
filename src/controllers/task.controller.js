@@ -158,6 +158,16 @@ const acknowledge = asyncHandler(async (req, res) => {
   res.json({ ok: true });
 });
 
+// Valet: "Later" on the driver-reminder prompt (see driverReminder.js) —
+// a DIFFERENT "Later" from the one above. This one means stop, not defer:
+// the repeating 60s reminder for this specific ticket goes silent, while
+// the ticket itself stays exactly where it was on "Driver assign pending"
+// for anyone (including this same valet) to act on whenever they're ready.
+const silenceDriverReminder = asyncHandler(async (req, res) => {
+  await require('../services/driverReminder').silence(parseId(req.params.id));
+  res.json({ ok: true });
+});
+
 // Valet: abort a parking job the driver is already out on — they bring the
 // car back to the counter instead of parking it.
 const recall = asyncHandler(async (req, res) => {
@@ -204,4 +214,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, silenceDriverReminder, updateLocation };

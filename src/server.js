@@ -37,6 +37,11 @@ acceptWatchdog.reconcileOrphanedDriverAssignments().catch((err) => {
 // restart on its own.
 require('./services/jobAlerts').startEscalationSweep();
 
+// Repeating "still needs a driver" reminder for freshly-created park
+// tickets — see driverReminder.js. Deliberately separate from the
+// escalation ladder above (different cadence, different silence rule).
+require('./services/driverReminder').startSweep();
+
 async function shutdown(signal) {
   // eslint-disable-next-line no-console
   console.log(`\n[kims-parking-backend] ${signal} received, shutting down...`);

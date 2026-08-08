@@ -36,6 +36,7 @@ router.patch('/:id/cancel-my-retrieval', requireRole('doctor', 'staff', 'admin')
 router.patch('/:id/accept-retrieval', requireRole('valet'), ctrl.acceptRetrieval);
 // Valet taps "Later" on a reassign prompt — defers escalation, doesn't cancel it.
 router.patch('/:id/acknowledge', requireRole('valet', 'admin'), ctrl.acknowledge);
+router.patch('/:id/silence-driver-reminder', requireRole('valet', 'admin'), ctrl.silenceDriverReminder);
 // Valet aborts a park job already in the driver's hands — "bring it back".
 router.patch('/:id/recall', requireRole('valet', 'admin'), ctrl.recall);
 // Driver confirms they've brought a recalled car back to the counter.
