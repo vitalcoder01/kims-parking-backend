@@ -98,6 +98,16 @@ async function alertTaskNeedsDriver(task, driverName, { rejected = false } = {})
   // the other, and the sweep escalated to every valet within seconds of the
   // owner being told. Re-stamping gives them their own window, from here.
   await touchOwnerWindow('task', task.id);
+  // A park-type task rolled back by the accept watchdog lands right back in
+  // driverReminder.js's sweep query (status 'assigned', driverId null) — this
+  // alert IS effectively that sweep's first tick, just fired immediately by
+  // the watchdog instead of waiting for the next 15s poll. Without this
+  // stamp the sweep didn't know that, and fired its own "still needs a
+  // driver" reminder within seconds of this one for the exact same ticket —
+  // the duplicate popup this comment is here because of.
+  if (task.type === 'park') {
+    await prisma.parkingTask.update({ where: { id: task.id }, data: { lastDriverReminderAt: new Date() } }).catch(() => {});
+  }
   emitTaskReassign(task, driverName, rejected, task.valetId ? 'owner' : 'all');
   const why = rejected ? 'rejected the job' : "didn't accept in time";
   await notifyOwnerOrAll({
@@ -109,6 +119,13 @@ async function alertTaskNeedsDriver(task, driverName, { rejected = false } = {})
 
 async function alertVisitorNeedsDriver(visitor, driverName, { rejected = false } = {}) {
   await touchOwnerWindow('visitor', visitor.id);
+  // Same coalescing as alertTaskNeedsDriver above — a visitor check-in's
+  // rollback is a rollback of its LINKED park task (see createVisitor),
+  // which is what driverReminder.js's sweep actually watches.
+  await prisma.parkingTask.updateMany({
+    where: { visitorId: visitor.id, type: 'park', isCurrent: true },
+    data: { lastDriverReminderAt: new Date() },
+  }).catch(() => {});
   emitVisitorReassign(visitor, driverName, rejected, visitor.valetId ? 'owner' : 'all');
   const why = rejected ? 'rejected the job' : "didn't accept in time";
   await notifyOwnerOrAll({
@@ -338,44 +355,49 @@ async function escalateStalledJobs() {
 
   // A job is stalled if it's sitting with no driver, owned by someone who
   // hasn't acted since before the cutoff, and hasn't already been escalated.
-  const [tasks, visitors] = await Promise.all([
-    prisma.parkingTask.findMany({
-      where: {
-        status: { in: ['requested', 'accepted', 'assigned'] },
-        driverId: null,
-        valetId: { not: null },
-        escalatedAt: null,
-        valetClaimedAt: { lt: cutoff },
-        // Every unclaimed departure belongs to the recovery pass below, not
-        // to this one. That covers all three of its states — scheduled for
-        // later, inside the owner's private window, and already broadcast —
-        // and recovery IS the escalation for them: it has already told every
-        // valet. Excluding only the first two meant a recovered request got a
-        // SECOND round one tick later ("still needs a driver" to the whole
-        // team) for a car the whole team had just been told about.
-        //
-        // A retrieval someone has actually claimed and then sat on still
-        // escalates here, which is the case this pass exists for.
-        NOT: {
-          type: 'retrieve',
-          retrievalOwnerValetId: null,
-        },
+  //
+  // 'assigned' is deliberately EXCLUDED from the status list below — that's
+  // a park-type task that's either never had a driver, or had one who
+  // didn't accept and got rolled back to it. Both are driverReminder.js's
+  // sweep's job now (a repeating 60s reminder, not a one-time escalation),
+  // and having both systems watch the same status here was exactly the
+  // duplicate-popup bug reported this session: a freshly-stalled park task
+  // got "Job still needs a driver" from THIS sweep AND from driverReminder's
+  // sweep within seconds of each other. 'requested'/'accepted' stay — those
+  // are retrieve-only states (a park task is never in either), so this pass
+  // now only ever touches retrieval requests, exactly the scope it was
+  // meant to keep per this session's explicit requirement.
+  const tasks = await prisma.parkingTask.findMany({
+    where: {
+      status: { in: ['requested', 'accepted'] },
+      driverId: null,
+      valetId: { not: null },
+      escalatedAt: null,
+      valetClaimedAt: { lt: cutoff },
+      // Every unclaimed departure belongs to the recovery pass below, not
+      // to this one. That covers all three of its states — scheduled for
+      // later, inside the owner's private window, and already broadcast —
+      // and recovery IS the escalation for them: it has already told every
+      // valet. Excluding only the first two meant a recovered request got a
+      // SECOND round one tick later ("still needs a driver" to the whole
+      // team) for a car the whole team had just been told about.
+      //
+      // A retrieval someone has actually claimed and then sat on still
+      // escalates here, which is the case this pass exists for.
+      NOT: {
+        type: 'retrieve',
+        retrievalOwnerValetId: null,
       },
-      include: { doctor: true, visitor: true, driver: { include: { user: true } }, valet: true },
-      take: 50,
-    }),
-    prisma.visitor.findMany({
-      where: {
-        status: 'pending',
-        driverId: null,
-        valetId: { not: null },
-        escalatedAt: null,
-        valetClaimedAt: { lt: cutoff },
-      },
-      include: { driver: { include: { user: true } } },
-      take: 50,
-    }),
-  ]);
+    },
+    include: { doctor: true, visitor: true, driver: { include: { user: true } }, valet: true },
+    take: 50,
+  });
+  // A visitor's own status stays 'pending' for exactly as long as its linked
+  // park task has no driver — driverReminder.js's sweep already watches
+  // that same underlying task (see createVisitor), so a separate pass over
+  // the Visitor table here would just be the same duplicate-popup bug this
+  // whole function is being scoped away from, one table over.
+  const visitors = [];
 
   // Rung 2 is "pull in the rest of the team". With one valet there is no rest
   // of the team, so it is skipped entirely and the ladder goes straight to
