@@ -3,6 +3,7 @@ node_modules/
 .env.development
 .env.production
 .env.local
+.env.test
 dist/
 *.log
 npm-debug.log*
