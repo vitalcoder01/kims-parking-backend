@@ -97,6 +97,21 @@ async function listVisitors() {
   }));
 }
 
+// Calendar-wise lookup for the valet's records tab — the default listVisitors
+// above is deliberately bounded (last 24h + still-active only) for the live
+// dashboard's sake, so it can never answer "show me last Tuesday". This is
+// the uncapped counterpart: every visitor whose check-in falls within
+// [start, end), any status, no row limit — a single day's worth of tokens is
+// never going to be large enough to need one. Not cached (CACHE_KEY above is
+// shared/short-lived for the live view; a date query is inherently one-shot).
+async function listVisitorsByRange(start, end) {
+  return prisma.visitor.findMany({
+    where: { createdAt: { gte: start, lt: end } },
+    include: visitorInclude,
+    orderBy: { createdAt: 'desc' },
+  });
+}
+
 // Plate suggestions for the check-in form. Sourced from plates the system has
 // already seen — past visitor check-ins and staff vehicles on file — so
 // typing "TS09" surfaces the real cars that start that way instead of asking
@@ -686,7 +701,7 @@ module.exports = {
   markRetrievalRequested,
   suggestPlates,
   normalisePlate,
-  listVisitors, getVisitor, createVisitor, updateVisitor,
+  listVisitors, listVisitorsByRange, getVisitor, createVisitor, updateVisitor,
   assignDriver, cancelPendingAssignment, acceptTask, rejectTask, markPickedUp, cancelVisitor, recallVisitor,
   markParked, requestRetrieval, assignRetrievalDriver, markRetrieved, confirmDelivered,
   trackByPublicToken,

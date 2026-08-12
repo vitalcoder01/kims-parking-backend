@@ -7,6 +7,17 @@ const { serializeTask, serializeVisitor, serializeVisitorPublic } = require('../
 const parseId = require('../utils/parseId');
 
 const list = asyncHandler(async (req, res) => {
+  // ?date=YYYY-MM-DD — the valet records tab's calendar view. Anything else
+  // (no param, or an unparseable one) falls back to the normal bounded live
+  // list untouched, so this is purely additive.
+  const { date } = req.query;
+  if (date) {
+    const start = new Date(`${date}T00:00:00`);
+    if (Number.isNaN(start.getTime())) throw ApiError.badRequest('Invalid date — expected YYYY-MM-DD');
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+    const visitors = await visitorService.listVisitorsByRange(start, end);
+    return res.json({ visitors: visitors.map(serializeVisitor) });
+  }
   const visitors = await visitorService.listVisitors();
   res.json({ visitors: visitors.map(serializeVisitor) });
 });
