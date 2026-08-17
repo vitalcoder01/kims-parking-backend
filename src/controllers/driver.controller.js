@@ -14,7 +14,18 @@ const setStatus = asyncHandler(async (req, res) => {
   if (!['available', 'busy', 'off'].includes(status)) {
     throw ApiError.badRequest('status must be one of: available, busy, off');
   }
-  const driver = await driverService.setStatus(parseId(req.params.id), status);
+  const targetId = parseId(req.params.id);
+
+  // The route allows driver, valet and admin — but "driver" was only ever
+  // meant to mean a driver going on or off duty THEMSELVES. Without this,
+  // the id in the URL was taken at face value, so any driver could put any
+  // other driver off duty. Valets and admins keep the wider power: managing
+  // the roster is their job.
+  if (req.user.role === 'driver' && req.user.driver?.id !== targetId) {
+    throw ApiError.forbidden('You can only change your own duty status');
+  }
+
+  const driver = await driverService.setStatus(targetId, status);
   res.json({ driver: serializeDriver(driver) });
 });
 

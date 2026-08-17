@@ -107,15 +107,41 @@ async function syncVisitorFromTask(task) {
       data.slotId = task.slotId;
       data.trackingProgress = 1;
     }
-    // A recalled park job's OTHER terminal outcome (see confirmDelivered):
-    // the car never got parked, it went back to the counter and the valet
-    // confirmed receipt. Without this the visitor row was left stranded at
-    // 'pending' forever — no live job, no way to tell it apart from a
-    // genuine still-in-progress check-in, and no way to close the token.
-    if (task.status === 'cancelled' && task.recalledAt) {
-      data.status = 'cancelled';
-      data.cancelledAt = task.completedAt ?? new Date();
-      data.cancelReason = 'valet_cancelled';
+    // Any cancelled park job is terminal for the visitor, whichever way it
+    // got there:
+    //   * recalled  — the car went back to the counter and the valet
+    //     confirmed receipt (see confirmDelivered);
+    //   * plain cancel — the valet gave up on the job before a driver ever
+    //     took it.
+    // This used to test `&& task.recalledAt`, so the second case fell through
+    // every branch and wrote nothing. Combined with cancelTask not calling
+    // this function at all, a cancelled check-in left the visitor stranded at
+    // 'pending' forever: no live job, indistinguishable from a genuine
+    // still-in-progress arrival, and — because the pending-visitor uniqueness
+    // index then matched it — blocking that car from ever checking in again.
+    if (task.status === 'cancelled') {
+      // Don't clobber a cancellation that already happened. cancelVisitor
+      // cancels the visitor FIRST with the real reason ('no_show',
+      // 'parking_failed', ...) and only then cancels the linked task, which
+      // lands back here — a blind write would relabel every one of those as
+      // a generic valet cancellation and lose why it actually happened.
+      const current = await prisma.visitor.findUnique({
+        where: { id: task.visitorId },
+        select: { status: true },
+      }).catch(() => null);
+      if (current?.status !== 'cancelled') {
+        data.status = 'cancelled';
+        data.cancelledAt = task.completedAt ?? new Date();
+        data.cancelReason = 'valet_cancelled';
+      }
+      // No driver is coming, so the mirror must not keep claiming one. Left
+      // set, the tracking page and the valet's list both go on showing a
+      // driver who was released back to the floor. Applied either way — an
+      // already-cancelled visitor can still be holding a stale driver.
+      data.driverId = null;
+      data.driverAssignedAt = null;
+      data.acceptedAt = null;
+      data.trackingProgress = null;
     }
   } else if (task.type === 'retrieve') {
     if (task.driverId != null) data.driverId = task.driverId;
@@ -713,6 +739,10 @@ function notifyDriverAssigned(task) {
       ? `Retrieve ${task.carNumber} from slot ${task.slotId} for ${ownerLabel(task, 'a guest')}.`
       : `Collect key from valet for ${ownerLabel(task, 'a guest')}'s car (${task.carNumber}).`,
     type: 'alarm',
+    // Job-scoped, so the expiry notice the watchdog sends replaces this entry
+    // rather than leaving a live-looking "Task Assigned!" in the tray next to
+    // it. See acceptWatchdog.fireTaskTimeout.
+    tag: require('./push.service').assignmentTag('task', task.id),
   });
 }
 
@@ -909,6 +939,35 @@ async function markParked(taskId, slotId, driverId) {
   emitSlot(slot);
   if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
   await syncVisitorFromTask(task).catch(() => {});
+
+  // Raised here rather than from the driver's app, which is where it used to
+  // live. Two reasons: the phone's copy of the task stores a missing doctorId
+  // as `undefined`, so a visitor's park produced a notification addressed to
+  // the literal string 'doctor:undefined' (258 such rows in production); and
+  // a driver whose phone dies right after tapping "Mark Parked" otherwise
+  // leaves the owner and the valet with no word that the car is down.
+  const parkedBy = task.driver?.user?.name ?? 'the driver';
+  if (task.doctorId != null) {
+    notificationService.push({
+      targetRole: `doctor:${task.doctorId}`,
+      targetUserId: task.doctorId,
+      title: 'Car Parked',
+      body: `Your car has been parked at slot ${task.slotId} by ${parkedBy}.`,
+      type: 'info',
+    }).catch(() => {});
+  }
+  // The valet who owns this session, not the whole team — every other valet
+  // would get an inbox entry for a car they have nothing to do with.
+  const parkOwner = task.arrivalOwnerValetId ?? task.valetId;
+  notificationService.push({
+    ...(parkOwner
+      ? { targetRole: `valet:${parkOwner}`, targetUserId: parkOwner }
+      : { targetRole: 'valet' }),
+    title: 'Car Parked',
+    body: `${task.carNumber} parked at ${task.slotId} by ${parkedBy}`,
+    type: 'info',
+  }).catch(() => {});
+
   return task;
 }
 
@@ -973,13 +1032,21 @@ async function markRetrieved(taskId, driverId) {
   // dies right after tapping "delivered" doesn't leave the doctor waiting
   // upstairs with no idea the car has arrived. 'info', not 'alarm': it
   // vibrates on the normal channel instead of ringing like a job alert.
-  notificationService.push({
-    targetRole: `doctor:${task.doctorId}`,
-    targetUserId: task.doctorId,
-    title: '🚗 Your car is ready',
-    body: `${task.carNumber} is waiting at the valet counter.`,
-    type: 'info',
-  }).catch(() => {});
+  // Staff only. A visitor is not a User, so a visitor's task has doctorId
+  // null — and this used to interpolate that straight into the target,
+  // producing the literal string 'doctor:null' and a notification addressed
+  // to nobody. 260 such rows accumulated in production, one per visitor
+  // retrieval, while the visitor themselves was never told anything. They are
+  // reached over WhatsApp and the public tracking page instead.
+  if (task.doctorId != null) {
+    notificationService.push({
+      targetRole: `doctor:${task.doctorId}`,
+      targetUserId: task.doctorId,
+      title: '🚗 Your car is ready',
+      body: `${task.carNumber} is waiting at the valet counter.`,
+      type: 'info',
+    }).catch(() => {});
+  }
 
   return task;
 }
@@ -1121,7 +1188,12 @@ async function cancelTask(taskId, byDoctorId) {
   const { updated, freedDriver, restoredParkId } = await runSerializable(async tx => {
     const result = await tx.parkingTask.update({
       where: { id: taskId },
-      data: { status: 'cancelled', completedAt: new Date() },
+      // isCurrent goes false in the same write that makes this terminal. A
+      // cancelled row that stays flagged current is still found by every
+      // "this owner's live job" lookup — which is exactly how a cancelled
+      // visitor ticket kept being handed to assignDriver, where it could
+      // only ever be refused (see visitor.service.js assignDriver).
+      data: { status: 'cancelled', completedAt: new Date(), isCurrent: false },
       include: taskInclude,
     });
     // A driver left mid-assignment would otherwise stay stuck 'busy' on a
@@ -1144,9 +1216,10 @@ async function cancelTask(taskId, byDoctorId) {
         where: { status: 'occupied', doctorId: task.doctorId, taskId: { not: null } },
       });
       if (slot?.taskId) {
-        // Step down before promoting: "at most one isCurrent row per doctor"
-        // is a partial unique index, and the other order trips it.
-        await tx.parkingTask.update({ where: { id: taskId }, data: { isCurrent: false } });
+        // The cancelled row already stepped down in the update above, which
+        // matters: "at most one isCurrent row per doctor" is a partial unique
+        // index, and promoting the park task while this one still held the
+        // flag would trip it.
         await tx.parkingTask.update({ where: { id: slot.taskId }, data: { isCurrent: true } });
         restored = slot.taskId;
       }
@@ -1160,6 +1233,11 @@ async function cancelTask(taskId, byDoctorId) {
     emitDriverPatch(task.driverId, 'available', null);
   }
   emitTask(updated);
+  // Cancel was the ONLY transition that never mirrored onto the linked
+  // Visitor row — every other one (accept, key collected, in transit,
+  // parked, retrieved, confirmed) already does. That omission is what left
+  // a cancelled check-in showing as a live 'pending' arrival forever.
+  await syncVisitorFromTask(updated).catch(() => {});
   // The park row is current again, so every client has to see it — otherwise
   // the doctor's app keeps the cancelled retrieve and still shows no car.
   if (restoredParkId) {
@@ -1232,13 +1310,18 @@ async function recallTask(taskId) {
   }
   // Their Vehicle Status card is showing "being parked" — without this it
   // would just silently revert with no explanation of where the car went.
-  notificationService.push({
-    targetRole: `doctor:${updated.doctorId}`,
-    targetUserId: updated.doctorId,
-    title: 'Parking Cancelled',
-    body: `${updated.carNumber} is being brought back to the valet counter instead of parked.`,
-    type: 'warning',
-  }).catch(() => {});
+  // Guarded for the same reason as markRetrieved above: a recalled VISITOR
+  // job has no doctor to tell, and the unguarded version addressed
+  // 'doctor:null'.
+  if (updated.doctorId != null) {
+    notificationService.push({
+      targetRole: `doctor:${updated.doctorId}`,
+      targetUserId: updated.doctorId,
+      title: 'Parking Cancelled',
+      body: `${updated.carNumber} is being brought back to the valet counter instead of parked.`,
+      type: 'warning',
+    }).catch(() => {});
+  }
 
   return updated;
 }

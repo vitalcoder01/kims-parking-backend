@@ -51,13 +51,40 @@ async function listDrivers({ status } = {}) {
   });
 }
 
+// The statuses that mean a driver is physically out on a job. Same set as the
+// partial unique index in migration 20260730170000 — they have to agree, or
+// this check passes something the database then refuses.
+const ACTIVE_TASK_STATUSES = ['assigned', 'key_collected', 'in_transit'];
+
 async function setStatus(driverId, status) {
   const driver = await prisma.driver.findUnique({ where: { id: driverId } });
   if (!driver) throw ApiError.notFound('Driver not found');
 
+  // Moving a driver off 'busy' used to be a blind write of the status column,
+  // leaving currentTaskId pointing at a job that was still live. The driver
+  // then LOOKED free while the database still held them: their next
+  // assignment tripped the one-live-job-per-driver index and came back as
+  // "This driver is already assigned to another job" — about someone the
+  // valet could plainly see listed as Ready — and stayed that way until the
+  // forgotten job closed. Refuse the move instead of creating that state.
+  if (status !== 'busy') {
+    const liveTask = await prisma.parkingTask.findFirst({
+      where: { driverId, status: { in: ACTIVE_TASK_STATUSES } },
+      select: { id: true, carNumber: true },
+    });
+    if (liveTask) {
+      throw ApiError.conflict(
+        `This driver is still out on ${liveTask.carNumber} — finish or cancel that job first`,
+        'DRIVER_BUSY',
+      );
+    }
+  }
+
   const updated = await prisma.driver.update({
     where: { id: driverId },
-    data: { status },
+    // With no live job, a lingering currentTaskId is stale by definition —
+    // clear it in the same write so the two can't disagree.
+    data: { status, ...(status === 'busy' ? {} : { currentTaskId: null }) },
     include: { user: true },
   });
   cache.invalidate('drivers:');

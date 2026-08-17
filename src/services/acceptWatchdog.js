@@ -9,6 +9,7 @@ const runSerializable = require('../utils/runSerializable');
 const cache = require('../utils/responseCache');
 const settingService = require('./setting.service');
 const notificationService = require('./notification.service');
+const pushService = require('./push.service');
 const realtime = require('../realtime');
 const { serializeTask, serializeVisitor } = require('../utils/serialize');
 // Required lazily inside the handlers: jobAlerts pulls in notification/
@@ -113,13 +114,34 @@ async function fireTaskTimeout(taskId, driverId) {
       include: taskInclude,
     });
     await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
-    return { updated, driverName };
+
+    // A visitor's pickup runs through THIS handler, not fireVisitorTimeout —
+    // visitor.service.js assignDriver delegates to taskService.assignDriver,
+    // which arms the 'task' watchdog. So this is the only place that can roll
+    // the visitor mirror back, and without it the driver was freed and the
+    // ticket cleared while the visitor row went on holding a driverId and a
+    // 25% progress bar forever. Same fields visitor.service.js's own reject
+    // path clears, for the same reason.
+    let updatedVisitor = null;
+    if (task.visitorId != null) {
+      updatedVisitor = await tx.visitor.update({
+        where: { id: task.visitorId },
+        data: { driverId: null, driverAssignedAt: null, acceptedAt: null, trackingProgress: 0 },
+        include: visitorInclude,
+      }).catch(() => null);
+    }
+
+    return { updated, driverName, updatedVisitor };
   });
   if (!rolledBack) return;
 
   cache.invalidate('tasks:');
   cache.invalidate('drivers:');
-  const { updated, driverName } = rolledBack;
+  const { updated, driverName, updatedVisitor } = rolledBack;
+  if (updatedVisitor) {
+    cache.invalidate('visitors:');
+    realtime.emitAll('visitor:upsert', serializeVisitor(updatedVisitor));
+  }
   const serialized = serializeTask(updated);
   realtime.emitAll('task:upsert', serialized);
   realtime.emitAll('driver:patch', { id: driverId, status: 'available', currentTaskId: null });
@@ -128,6 +150,25 @@ async function fireTaskTimeout(taskId, driverId) {
   // — it cannot be swiped away — so if they miss this they are left holding a
   // live-looking alarm for a job that is no longer theirs.
   realtime.emitToDriver(driverId, 'assignment:cancelled', { kind: 'task', id: taskId });
+  // ...and again as a push, because the socket emit above can only reach a
+  // driver who is currently connected — and the driver who most needs this
+  // is by definition the one who wasn't (offline, dozing, app force-stopped)
+  // and therefore never accepted. Emitting into an empty room is not
+  // delivery, and there is no replay.
+  //
+  // Shares the assignment's tray tag, so on the device this REPLACES the
+  // "🔔 Task Assigned!" entry instead of sitting beneath it. Deliberately
+  // not type 'alarm': the job is over, so it must not ring.
+  await notificationService.push({
+    targetRole: `driver:${driverId}`,
+    title: 'Assignment expired',
+    body: `${updated.carNumber} was reassigned — you no longer have this job.`,
+    type: 'info',
+    tag: pushService.assignmentTag('task', taskId),
+    // Read by the app's background FCM handler to kill a still-ringing alarm
+    // on a phone that never saw the socket event.
+    data: { kind: 'assignment-cancelled', jobKind: 'task', jobId: String(taskId) },
+  }).catch(() => {});
   // Owner-targeted rather than broadcast to every valet — jobAlerts decides
   // who to address, and its sweep escalates if the owner doesn't act.
   await jobAlerts().alertTaskNeedsDriver(updated, driverName);
@@ -201,12 +242,28 @@ async function reconcileOrphanedDriverAssignments() {
   if (stale.length === 0) return 0;
 
   for (const task of stale) {
+    const strippedDriverId = task.driverId;
     const updated = await prisma.parkingTask.update({
       where: { id: task.id },
       data: { driverId: null, acceptedAt: null },
       include: taskInclude,
     });
     realtime.emitAll('task:upsert', serializeTask(updated));
+    // Every other rollback path tells the driver directly; this one only
+    // broadcast the task delta, so a driver could watch their job card
+    // silently stop being theirs — potentially while holding the car — with
+    // nothing said and any alarm left ringing.
+    if (strippedDriverId) {
+      realtime.emitToDriver(strippedDriverId, 'assignment:cancelled', { kind: 'task', id: task.id });
+      await notificationService.push({
+        targetRole: `driver:${strippedDriverId}`,
+        title: 'Assignment cleared',
+        body: `${updated.carNumber} is no longer assigned to you. Check with the valet desk.`,
+        type: 'info',
+        tag: pushService.assignmentTag('task', task.id),
+        data: { kind: 'assignment-cancelled', jobKind: 'task', jobId: String(task.id) },
+      }).catch(() => {});
+    }
   }
   cache.invalidate('tasks:');
   // eslint-disable-next-line no-console

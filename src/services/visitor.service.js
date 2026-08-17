@@ -340,19 +340,8 @@ async function createVisitor({ name, carNumber, mobile, vehicleType, valetId }) 
   //
   // Created here, unassigned, mirroring createTask for staff: the valet then
   // picks a driver through the same assignDriver call.
-  const linkedTask = await prisma.parkingTask.create({
-    data: {
-      type: 'park',
-      visitorId: visitor.id,
-      carNumber: visitor.carNumber ?? '',
-      status: 'assigned',
-      assignedAt: new Date(),
-      isCurrent: true,
-      valetId: valetId ?? null,
-      valetClaimedAt: valetId ? new Date() : null,
-    },
-    include: { doctor: true, driver: { include: { user: true } } },
-  }).catch(() => null); // a missing task must not fail the check-in
+  // a missing task must not fail the check-in
+  const linkedTask = await createParkTaskForVisitor(visitor, valetId).catch(() => null);
 
   cache.invalidate('tasks:');
   cache.invalidate('visitors:');
@@ -400,15 +389,44 @@ async function updateVisitor(id, patch) {
 // The locking, the driver-availability check, the accept watchdog, the
 // "one job one valet" claim and the driver's push notification are all that
 // function's, not reimplemented here. This only finds the visitor's task.
+// The visitor's parking job as a real ParkingTask — the same row a staff
+// member's key handover produces, so it carries the same lifecycle, the same
+// driver actions and the same realtime deltas.
+//
+// Shared by check-in (which raises it unassigned) and by assignDriver (which
+// raises a replacement if the original was cancelled), so the two can never
+// drift into building subtly different rows.
+async function createParkTaskForVisitor(visitor, valetId) {
+  return prisma.parkingTask.create({
+    data: {
+      type: 'park',
+      visitorId: visitor.id,
+      carNumber: visitor.carNumber ?? '',
+      status: 'assigned',
+      assignedAt: new Date(),
+      isCurrent: true,
+      valetId: valetId ?? null,
+      valetClaimedAt: valetId ? new Date() : null,
+    },
+    include: { doctor: true, driver: { include: { user: true } } },
+  });
+}
+
 async function assignDriver(visitorId, driverId, valetId) {
   const visitor = await prisma.visitor.findUnique({ where: { id: visitorId } });
   if (!visitor) throw ApiError.notFound('Visitor not found');
   assertTransition(visitor, ['pending'], 'assign a driver');
 
-  const task = await prisma.parkingTask.findFirst({
-    where: { visitorId, type: 'park', isCurrent: true },
-  });
-  if (!task) throw ApiError.conflict('This visitor has no parking job to assign', 'JOB_GONE');
+  // A pending visitor with no live ticket is a job that still needs doing,
+  // not an error. This used to throw, which is how a visitor whose ticket had
+  // been cancelled became permanently unassignable: the check-in dedup index
+  // means re-checking them in returns the SAME row (see createVisitor), so
+  // every subsequent attempt hit the same dead ticket and the same 409, with
+  // no way out from the valet's screen. Raising a fresh ticket is both the
+  // honest reading and the only exit.
+  const task = await findLinkedParkTask(visitorId)
+    ?? await createParkTaskForVisitor(visitor, valetId ?? visitor.valetId);
+  if (!task) throw ApiError.conflict('Could not raise a parking job for this visitor', 'JOB_GONE');
 
   await taskService().assignDriver(task.id, driverId, null, valetId);
 

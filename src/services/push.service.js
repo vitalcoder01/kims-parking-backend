@@ -90,12 +90,42 @@ async function resolveTargetUserIds(targetRole, targetUserId) {
 // (this push, and the socket's notification:new) carry it, so the same event
 // resolves to ONE tray entry instead of two — see displayNotification on the
 // app side. Every value in an FCM data payload must be a string.
-async function pushToUsers(userIds, { title, body, type = 'info', notifId, data = {} }) {
+// How long FCM keeps retrying an undelivered message.
+//
+// This MUST NOT outlive the thing the message is about. An assignment alarm
+// is only true for as long as the driver still has the job: past the accept
+// window the watchdog has already rolled it back, freed the driver and moved
+// on — so a late delivery rings a phone about a job that no longer exists,
+// which is exactly the "I opened it and there was nothing there" report. It
+// used to be a flat 5 minutes against a 60-second window, leaving four
+// minutes in which every delivery was guaranteed stale.
+//
+// Informational pushes ("your car is ready") describe something that stays
+// true, so those keep the longer window.
+const INFO_TTL_MS = 5 * 60 * 1000;
+
+async function alarmTtlMs() {
+  try {
+    // eslint-disable-next-line global-require
+    return await require('./setting.service').getAcceptTimeoutMs();
+  } catch {
+    return 60 * 1000;
+  }
+}
+
+async function pushToUsers(userIds, { title, body, type = 'info', notifId, tag, data = {} }) {
   const m = init();
   if (!m || userIds.length === 0) return;
 
   const tokens = await prisma.deviceToken.findMany({ where: { userId: { in: userIds } } });
   if (tokens.length === 0) return;
+
+  // Tray identity. Defaults to the notification's own id (one event, one
+  // entry) but a caller can pass a stable job-scoped tag so a later message
+  // about the SAME job — notably the cancellation below — replaces the
+  // original entry instead of stacking a second, contradictory one.
+  const trayTag = tag ?? (notifId != null ? `kims-notif-${notifId}` : undefined);
+  const ttl = type === 'alarm' ? await alarmTtlMs() : INFO_TTL_MS;
 
   // A data-only message needs the app's background handler to run in order to
   // show anything. That is fine while the app is merely backgrounded, but a
@@ -115,7 +145,7 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, data 
     ...(isAlarm ? {} : { notification: { title, body } }),
     android: {
       priority: 'high',
-      ttl: 5 * 60 * 1000,
+      ttl,
       ...(isAlarm ? {} : {
         notification: {
           // v2: the original channel was created with no explicit sound —
@@ -125,7 +155,7 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, data 
           channelId: 'kims_parking_v2',
           // Same identity the in-app path uses, so a repeat delivery replaces
           // the entry instead of stacking a second one.
-          ...(notifId != null ? { tag: `kims-notif-${notifId}` } : {}),
+          ...(trayTag ? { tag: trayTag } : {}),
         },
       }),
     },
@@ -151,10 +181,10 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, data 
     notification: { title, body },
     android: {
       priority: 'high',
-      ttl: 5 * 60 * 1000,
+      ttl,
       notification: {
         channelId: 'kims_parking_ring_v2',
-        ...(notifId != null ? { tag: `kims-notif-${notifId}` } : {}),
+        ...(trayTag ? { tag: trayTag } : {}),
       },
     },
   } : null;
@@ -188,4 +218,12 @@ async function pushToTarget(targetRole, targetUserId, payload) {
   return pushToUsers(userIds, payload);
 }
 
-module.exports = { registerDevice, unregisterDevice, pushToUsers, pushToTarget, resolveTargetUserIds };
+// Stable tray identity for everything said about one assignment, so the
+// "this job is yours" alarm and the "it expired" notice that follows it are
+// the same entry on the device rather than two contradictory ones sitting
+// side by side.
+function assignmentTag(kind, id) {
+  return `kims-assign-${kind}-${id}`;
+}
+
+module.exports = { registerDevice, unregisterDevice, pushToUsers, pushToTarget, resolveTargetUserIds, assignmentTag };

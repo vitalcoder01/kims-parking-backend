@@ -214,9 +214,11 @@ model ParkingTask {
   // express a WHERE-qualified unique constraint.
   @@index([retrievalReadyAt])
   @@index([visitorId])
-  @@index([doctorId])
+  // No bare @@index([doctorId]): Postgres can use the leading column of the
+  // composite below on its own, so a single-column copy was pure write cost
+  // on every task update — and GPS pings make those the hottest writes here.
   @@index([doctorId, createdAt])
-  @@index([driverId])
+  // Same as doctorId above — covered by the [driverId, createdAt] composite.
   // The driver app's "completed today" / history fetch is WHERE driverId = ?
   // ORDER BY createdAt DESC — same shape as the doctorId composite above,
   // just missing. Without it Postgres has only the plain driverId index to
@@ -282,7 +284,8 @@ model Notification {
 
   @@index([targetRole])
   @@index([targetUserId])
-  @@index([read])
+  // No @@index([read]): never used by any query, and no row is ever marked
+  // read, so it indexed a column with one value.
   @@index([createdAt])
   @@map("notifications")
 }

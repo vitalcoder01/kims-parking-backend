@@ -11,7 +11,7 @@ const { serializeNotification } = require('../utils/serialize');
 // Creating a notification now also (a) emits it over the socket to exactly
 // the clients it targets — this is what makes phones ring in real time —
 // and (b) sends an FCM push so killed/rebooted apps still get it.
-async function push({ targetRole, targetUserId, title, body, type, data }) {
+async function push({ targetRole, targetUserId, title, body, type, data, tag }) {
   const notif = await prisma.notification.create({
     data: { targetRole, targetUserId: targetUserId ?? null, title, body, type: type || 'info' },
   });
@@ -21,8 +21,10 @@ async function push({ targetRole, targetUserId, title, body, type, data }) {
   // Fire-and-forget: FCM latency/failures must never block the API response.
   // notifId ties this push to the same on-device notification the socket
   // delta raises, so a phone that receives both shows one, not two.
+  // `tag`, when given, overrides that with a job-scoped identity so a later
+  // message about the same job replaces this entry rather than stacking.
   pushService.pushToTarget(targetRole, targetUserId, {
-    title, body, type: type || 'info', notifId: notif.id, data,
+    title, body, type: type || 'info', notifId: notif.id, data, tag,
   }).catch(() => {});
 
   return notif;
