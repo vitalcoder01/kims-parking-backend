@@ -52,10 +52,17 @@ function emitTargeted(targetRole, targetUserId, payload) {
 }
 
 // Notifications relevant to a given logged-in user: their own role, "all",
-// their user id, or (for drivers) their driver-id-scoped tag.
+// their user id, or (for drivers) their driver-id-scoped tag, or (for
+// valets) their user-id-scoped tag — e.g. task.service.js's markParked
+// addresses "car parked at the counter" to `valet:${parkOwner}`, not the
+// broadcast 'valet' role, so an owner-specific push was never retrievable
+// through this REST fallback either (a valet who reconnects/never saw the
+// live socket event had no way to recover it — same underlying gap as the
+// client's isForMe filter, which had the identical omission).
 async function listForUser(user) {
   const roleTags = [user.role, 'all'];
   if (user.driver) roleTags.push(`driver:${user.driver.id}`);
+  if (user.role === 'valet') roleTags.push(`valet:${user.id}`);
 
   return prisma.notification.findMany({
     where: {
