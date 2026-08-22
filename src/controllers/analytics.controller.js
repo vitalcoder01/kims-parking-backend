@@ -40,7 +40,7 @@ const overview = asyncHandler(async (req, res) => {
     throw ApiError.badRequest(`period must be one of: ${PERIODS.join(', ')}`);
   }
   const range = periodRange(period);
-  res.json({ ...(await analyticsService.overview(range)), period: period || 'all' });
+  res.json({ ...(await analyticsService.overview(range, period || 'all')), period: period || 'all' });
 });
 
 module.exports = { overview };

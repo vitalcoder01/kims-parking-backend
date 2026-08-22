@@ -28,11 +28,38 @@ function avgMinutes(rows, fromKey, toKey) {
   return Math.round((diffs.reduce((a, b) => a + b, 0) / diffs.length) * 10) / 10;
 }
 
+// Bucket labels + the function that maps a completed task's completedAt to
+// a bucket index, one pair per period granularity. Chosen so the trend
+// chart's resolution matches what's actually meaningful to look at: hourly
+// within a single day, but daily within a week/month (an hourly chart for
+// a whole month would be 720+ silent bars), monthly within a year.
+const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function trendBuckets(period, range) {
+  if (period === 'daily') {
+    return { labels: Array.from({ length: 24 }, (_, h) => String(h)), bucketOf: (d) => d.getHours() };
+  }
+  if (period === 'weekly') {
+    return { labels: WEEKDAY_LABELS, bucketOf: (d) => (d.getDay() + 6) % 7 }; // Mon=0..Sun=6
+  }
+  if (period === 'monthly') {
+    const daysInMonth = new Date(range.from.getFullYear(), range.from.getMonth() + 1, 0).getDate();
+    return { labels: Array.from({ length: daysInMonth }, (_, i) => String(i + 1)), bucketOf: (d) => d.getDate() - 1 };
+  }
+  if (period === 'yearly') {
+    return { labels: MONTH_LABELS, bucketOf: (d) => d.getMonth() };
+  }
+  return null; // 'all' (or no period): no trend breakdown, just the existing all-time hour-of-day histogram
+}
+
 // `range` is optional — { from: Date, to: Date }, both inclusive-exclusive
 // on completedAt (a job counts toward a period by when it FINISHED, not
 // when it started, matching how "today" already reads on the live
-// dashboard). Omitted entirely means the original all-time behavior.
-async function overview(range) {
+// dashboard). `period` (the same string the range was derived from) picks
+// the trend chart's bucket granularity — see trendBuckets above. Both
+// omitted means the original all-time behavior, unchanged.
+async function overview(range, period) {
   const completedWhere = { status: 'completed' };
   if (range?.from || range?.to) {
     completedWhere.completedAt = {
@@ -45,7 +72,7 @@ async function overview(range) {
     prisma.parkingTask.findMany({
       where: completedWhere,
       select: {
-        id: true, type: true, driverId: true, visitorId: true,
+        id: true, type: true, driverId: true, visitorId: true, slotId: true,
         assignedAt: true, keyCollectedAt: true, completedAt: true,
       },
     }),
@@ -63,6 +90,42 @@ async function overview(range) {
     hourCounts[new Date(t.completedAt).getHours()]++;
   }
   const busiestHour = hourCounts.every(c => c === 0) ? null : hourCounts.indexOf(Math.max(...hourCounts));
+
+  // Block utilization — which block actually got used during this window.
+  // Counted from completed PARK jobs only (a retrieve's slotId is where the
+  // car came FROM, i.e. the same park event already counted) — slot ids are
+  // "<block>-<number>" (see prisma/seed.js), so the block is just the part
+  // before the dash. Vehicles whose slotId somehow never got set (shouldn't
+  // happen for a completed park, but nothing enforces it at the DB level)
+  // are simply not counted rather than guessed at.
+  const blockCounts = new Map();
+  for (const t of parkTasks) {
+    if (!t.slotId) continue;
+    const block = t.slotId.split('-')[0];
+    blockCounts.set(block, (blockCounts.get(block) ?? 0) + 1);
+  }
+  const blockUtilization = [...blockCounts.entries()]
+    .map(([block, count]) => ({ block, count }))
+    .sort((a, b) => b.count - a.count || a.block.localeCompare(b.block));
+
+  // Park-vs-retrieve trend within the period, bucketed at whatever
+  // resolution actually makes sense for that period's span (see
+  // trendBuckets) — null for 'all', where the existing hour-of-day
+  // histogram above already covers the "when" question a calendar trend
+  // can't usefully answer over a multi-year span.
+  const buckets = trendBuckets(period, range);
+  let trend = null;
+  if (buckets) {
+    const park = new Array(buckets.labels.length).fill(0);
+    const retrieve = new Array(buckets.labels.length).fill(0);
+    for (const t of completedTasks) {
+      if (!t.completedAt) continue;
+      const idx = buckets.bucketOf(new Date(t.completedAt));
+      if (idx < 0 || idx >= buckets.labels.length) continue; // defensive — a bad bucketOf should drop the point, not throw
+      (t.type === 'park' ? park : retrieve)[idx]++;
+    }
+    trend = { labels: buckets.labels, park, retrieve };
+  }
 
   const drivers = driverRows
     .map(d => {
@@ -97,6 +160,8 @@ async function overview(range) {
     // Full 24-slot histogram, not just the peak — lets the UI draw a real
     // hour-by-hour chart instead of a single "6 AM" data point.
     hourlyDistribution: hourCounts,
+    blockUtilization,
+    trend,
     visitorJobs: completedTasks.filter(t => t.visitorId != null).length,
     staffJobs: completedTasks.filter(t => t.visitorId == null).length,
     drivers,
