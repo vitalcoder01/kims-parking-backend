@@ -1,17 +1,20 @@
 const prisma = require('../config/database');
 
-// All-time operational analytics — cars parked/retrieved, per-driver
-// breakdown, and timing stats. Computed from completed ParkingTask rows;
-// pulled once and reduced in JS rather than SQL AVG(), since the duration
-// we care about is the difference between two columns (not a single
-// column's average), which isn't portably expressible as a single
-// aggregate across every DB Prisma targets.
+// Operational analytics — cars parked/retrieved, per-driver breakdown, and
+// timing stats. Computed from completed ParkingTask rows; pulled once and
+// reduced in JS rather than SQL AVG(), since the duration we care about is
+// the difference between two columns (not a single column's average),
+// which isn't portably expressible as a single aggregate across every DB
+// Prisma targets.
 //
-// No date-range filtering (all-time only, by design — see the "premium
-// analytics" feature request) — if the completed-task volume grows large
-// enough that pulling every row becomes slow, this is the first place to
-// push the reduction into SQL (e.g. a raw query with AVG(EXTRACT(EPOCH
-// FROM "completedAt" - "keyCollectedAt"))).
+// Date-range filtering is optional (all-time when omitted, same as
+// before) — added because the admin dashboard's period selector
+// (Daily/Weekly/Monthly/Yearly) needs a real, database-backed scoped
+// answer, not something guessed client-side from a capped recent-task
+// fetch. If the completed-task volume grows large enough that pulling
+// every row in range becomes slow, this is the first place to push the
+// reduction into SQL (e.g. a raw query with AVG(EXTRACT(EPOCH FROM
+// "completedAt" - "keyCollectedAt"))).
 
 /** Average minutes between two timestamp columns, over rows where both are
  *  set. Returns null (not 0) when there's no data yet — "no data" and
@@ -25,10 +28,22 @@ function avgMinutes(rows, fromKey, toKey) {
   return Math.round((diffs.reduce((a, b) => a + b, 0) / diffs.length) * 10) / 10;
 }
 
-async function overview() {
+// `range` is optional — { from: Date, to: Date }, both inclusive-exclusive
+// on completedAt (a job counts toward a period by when it FINISHED, not
+// when it started, matching how "today" already reads on the live
+// dashboard). Omitted entirely means the original all-time behavior.
+async function overview(range) {
+  const completedWhere = { status: 'completed' };
+  if (range?.from || range?.to) {
+    completedWhere.completedAt = {
+      ...(range.from && { gte: range.from }),
+      ...(range.to && { lt: range.to }),
+    };
+  }
+
   const [completedTasks, driverRows] = await Promise.all([
     prisma.parkingTask.findMany({
-      where: { status: 'completed' },
+      where: completedWhere,
       select: {
         id: true, type: true, driverId: true, visitorId: true,
         assignedAt: true, keyCollectedAt: true, completedAt: true,
