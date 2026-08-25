@@ -1161,6 +1161,63 @@ async function cancelPendingAssignment(taskId) {
 // `byDoctorId` is set when a doctor/staff member cancels their own departure
 // request from their app, and is what scopes them to their own car. Left
 // undefined for valet/admin cancels, which may act on any job.
+// Valet: close out a parking session whose car is physically gone.
+//
+// A car whose owner drove off without anyone requesting a retrieval leaves
+// the session open and the slot marked occupied forever — nothing in the
+// normal lifecycle can clear it, because the park task is already
+// `completed` and cancelTask below deliberately refuses anything past
+// 'assigned'. That stale row sits in the valet's Parked Vehicles list and,
+// worse, holds a slot the car park can no longer sell.
+//
+// This is the deliberate escape hatch for exactly that case, and it is
+// destructive on purpose: it frees the slot. The valet is asserting the car
+// has actually left. The client confirms that in as many words before
+// calling this — if the car IS still in the bay, freeing the slot would let
+// the next park job be sent to an occupied space.
+async function closeParkedSession(taskId) {
+  const existing = await getTask(taskId);
+  if (existing.type !== 'park') throw ApiError.conflict('Only a parking session can be closed this way', 'JOB_GONE');
+  if (existing.status !== 'completed') {
+    // Anything not yet parked is a live job with its own proper ending
+    // (cancel, recall, or just finishing) — routing it through here would
+    // skip the driver/notification handling those paths do.
+    throw ApiError.conflict('This car is not parked yet — cancel or recall the job instead', 'JOB_GONE');
+  }
+
+  const { task, slot } = await prisma.$transaction(async (tx) => {
+    let freedSlot = null;
+    // Same authority and the same doctorId sanity check markRetrieved uses:
+    // the slot recorded on the task is which slot this session occupies.
+    if (existing.slotId) {
+      const s = await tx.parkingSlot.findUnique({ where: { id: existing.slotId } });
+      if (s?.status === 'occupied' && s.doctorId === existing.doctorId) {
+        freedSlot = await tx.parkingSlot.update({
+          where: { id: existing.slotId },
+          data: { status: 'free', taskId: null, carNumber: null, doctorId: null },
+        });
+      }
+    }
+    const updatedTask = await tx.parkingTask.update({
+      where: { id: taskId },
+      // isCurrent false for the same reason cancelTask does it — a closed
+      // session that stays flagged current is still found by every "this
+      // owner's live job" lookup.
+      // No cancelReason column on ParkingTask (that field is on Visitor) —
+      // the status plus completedAt is the whole record here.
+      data: { status: 'cancelled', completedAt: new Date(), isCurrent: false },
+      include: taskInclude,
+    });
+    return { task: updatedTask, slot: freedSlot };
+  });
+
+  cache.invalidate('tasks:');
+  cache.invalidate('slots:');
+  emitTask(task);
+  if (slot) emitSlot(slot);
+  return task;
+}
+
 async function cancelTask(taskId, byDoctorId) {
   const task = await getTask(taskId);
 
@@ -1387,6 +1444,7 @@ module.exports = {
   assignRetrievalDriverForDoctor,
   assignDriver,
   cancelPendingAssignment,
+  closeParkedSession,
   acceptTask,
   rejectTask,
   markKeyCollected,

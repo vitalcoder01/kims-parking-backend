@@ -66,13 +66,27 @@ async function fulfillForDoctor(doctorId) {
 // Valet: manually clear a notice that was a no-show or a mistake, without
 // waiting around for it to auto-clear (which never happens if the doctor
 // never actually hands over a car).
-async function dismiss(id) {
+// The doctor/staff member's own still-open heads-up, if they have one.
+// Their app needs this to offer "I'm not coming after all" — without it the
+// only way to clear a notice was for a valet to dismiss it from their side,
+// so someone whose plans changed had no way to take it back.
+async function findActiveForDoctor(doctorId) {
+  return prisma.arrivalNotice.findFirst({ where: { doctorId, fulfilledAt: null }, include });
+}
+
+// `byDoctorId` is set when a doctor/staff member cancels their OWN heads-up
+// from their app, and is what scopes them to their own notice. Left
+// undefined for valet/admin dismissals, which may clear any notice.
+async function dismiss(id, byDoctorId) {
   const notice = await prisma.arrivalNotice.findUnique({ where: { id } });
   if (!notice) throw ApiError.notFound('Arrival notice not found');
+  if (byDoctorId !== undefined && notice.doctorId !== byDoctorId) {
+    throw ApiError.forbidden('This is not your arrival notice');
+  }
   if (notice.fulfilledAt) return notice;
   const updated = await prisma.arrivalNotice.update({ where: { id }, data: { fulfilledAt: new Date() } });
   emitRemove(id);
   return updated;
 }
 
-module.exports = { create, accept, listActive, fulfillForDoctor, dismiss };
+module.exports = { create, accept, listActive, findActiveForDoctor, fulfillForDoctor, dismiss };

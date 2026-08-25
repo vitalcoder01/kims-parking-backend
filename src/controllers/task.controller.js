@@ -194,6 +194,14 @@ const cancel = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Valet/admin: close a parked session whose car physically left without
+// anyone requesting a retrieval, freeing the slot it was holding. See
+// closeParkedSession — destructive by design, the client confirms first.
+const closeParked = asyncHandler(async (req, res) => {
+  const task = await taskService.closeParkedSession(parseId(req.params.id));
+  res.json({ task: serializeTask(task) });
+});
+
 // Doctor/staff: call off a departure they asked for. Scoped to their own car
 // by passing their id — the service refuses anyone else's, and refuses once
 // the driver has actually set off.
@@ -214,4 +222,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, recall, markReturned, acknowledge, silenceDriverReminder, updateLocation };
+module.exports = { list, get, create, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder, updateLocation };

@@ -23,9 +23,19 @@ const list = asyncHandler(async (req, res) => {
   res.json({ arrivals: notices.map(serializeArrivalNotice) });
 });
 
+// The caller's own open heads-up (or null) — doctor/staff only. `list`
+// above is the valet's whole-queue view and stays valet/admin-scoped.
+const mine = asyncHandler(async (req, res) => {
+  const notice = await svc.findActiveForDoctor(req.user.id);
+  res.json({ arrival: notice ? serializeArrivalNotice(notice) : null });
+});
+
 const dismiss = asyncHandler(async (req, res) => {
-  const notice = await svc.dismiss(parseId(req.params.id));
+  // A doctor/staff member may only clear their OWN notice; valet/admin may
+  // clear any. Passing undefined is what opts out of the ownership check.
+  const isOwnerCancelling = req.user.role === 'doctor' || req.user.role === 'staff';
+  const notice = await svc.dismiss(parseId(req.params.id), isOwnerCancelling ? req.user.id : undefined);
   res.json({ arrival: serializeArrivalNotice(notice) });
 });
 
-module.exports = { create, list, accept, dismiss };
+module.exports = { create, list, mine, accept, dismiss };

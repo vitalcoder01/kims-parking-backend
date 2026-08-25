@@ -7,8 +7,12 @@ const router = express.Router();
 router.use(requireAuth);
 
 router.get('/', requireRole('valet', 'admin'), ctrl.list);
+// Must be declared before any '/:id' route would shadow it.
+router.get('/mine', requireRole('doctor', 'staff', 'admin'), ctrl.mine);
 router.post('/', requireRole('doctor', 'staff', 'admin'), ctrl.create);
 router.patch('/:id/accept', requireRole('valet'), ctrl.accept);
-router.patch('/:id/dismiss', requireRole('valet', 'admin'), ctrl.dismiss);
+// Doctor/staff included so someone whose plans changed can take their own
+// heads-up back; the controller scopes them to their own notice.
+router.patch('/:id/dismiss', requireRole('valet', 'admin', 'doctor', 'staff'), ctrl.dismiss);
 
 module.exports = router;
