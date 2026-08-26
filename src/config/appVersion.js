@@ -41,6 +41,12 @@ const V1_9_15 = release(
   'Fixes notifications and vibration, which had stopped working entirely in 1.9.12-1.9.14 (a bad vibration pattern silently disabled every alert). Alarm alerts now buzz a distinctive three-taps-then-long rhythm with looping sound for a full 20 seconds, so arrival/retrieval requests and job assignments are hard to miss.',
 );
 
+const V1_9_16 = release(
+  50,
+  '1.9.16',
+  'Much smaller download — 37 MB, down from 68 MB — and a lighter app: screens no longer redraw every time a driver location update arrives. Valet records gain Today / Yesterday / This week / This month filters.',
+);
+
 // ── Channels ─────────────────────────────────────────────────────────────
 /*
  * To ship to one role: add the release constant above, then point that
@@ -62,11 +68,11 @@ const V1_9_15 = release(
  * someone complains they never got an update.
  */
 const BY_ROLE = {
-  admin: V1_9_15,
-  valet: V1_9_15,
-  driver: V1_9_15,
-  doctor: V1_9_15,
-  staff: V1_9_15,
+  admin: V1_9_16,
+  valet: V1_9_16,
+  driver: V1_9_16,
+  doctor: V1_9_16,
+  staff: V1_9_16,
 };
 
 /*
@@ -78,7 +84,7 @@ const BY_ROLE = {
  * release the broadest set of users is on — it is what someone sees at the
  * login screen, before their own channel can apply.
  */
-const DEFAULT = V1_9_15;
+const DEFAULT = V1_9_16;
 
 /*
  * The floor. No build below this is allowed to keep running, whatever its
