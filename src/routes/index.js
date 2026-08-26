@@ -44,7 +44,18 @@ router.get('/health', asyncHandler(async (req, res) => {
 }));
 
 // Public (no auth) — lets every client, even a stale/broken one, check
-// whether a newer APK exists and prompt the user to install it.
-router.get('/app/version', (req, res) => res.json(require('../config/appVersion')));
+// whether a newer APK exists and prompt the user to install it. Staying
+// unauthenticated is deliberate: a build too old to hold a valid session
+// still has to be able to find out it is too old.
+//
+// ?role= is a targeting hint, not a claim of identity, and it is treated as
+// exactly that. The worst a forged role can do is fetch a different public
+// APK URL than the sender's real role would have — there is nothing here to
+// escalate to, which is why an unauthenticated hint is acceptable where an
+// unauthenticated permission never would be.
+router.get('/app/version', (req, res) => {
+  const role = typeof req.query.role === 'string' ? req.query.role : undefined;
+  res.json(require('../config/appVersion').resolveFor(role));
+});
 
 module.exports = router;
