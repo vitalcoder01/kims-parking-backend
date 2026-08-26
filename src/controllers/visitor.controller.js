@@ -10,7 +10,25 @@ const list = asyncHandler(async (req, res) => {
   // ?date=YYYY-MM-DD — the valet records tab's calendar view. Anything else
   // (no param, or an unparseable one) falls back to the normal bounded live
   // list untouched, so this is purely additive.
-  const { date } = req.query;
+  const { date, from, to } = req.query;
+
+  // ?from=YYYY-MM-DD[&to=YYYY-MM-DD] — the records tab's Today / Yesterday /
+  // This week / This month buttons. `to` is INCLUSIVE (the caller names the
+  // last day they want, not the exclusive boundary), so a single day is
+  // from===to and the end is pushed to that day's midnight+1. Omitting `to`
+  // is the same as a one-day range, which makes ?from= a superset of the
+  // older ?date= below.
+  if (from) {
+    const start = new Date(`${from}T00:00:00`);
+    if (Number.isNaN(start.getTime())) throw ApiError.badRequest('Invalid `from` — expected YYYY-MM-DD');
+    const lastDay = to ? new Date(`${to}T00:00:00`) : start;
+    if (Number.isNaN(lastDay.getTime())) throw ApiError.badRequest('Invalid `to` — expected YYYY-MM-DD');
+    if (lastDay < start) throw ApiError.badRequest('`to` cannot be before `from`');
+    const end = new Date(lastDay.getTime() + 24 * 60 * 60 * 1000);
+    const visitors = await visitorService.listVisitorsByRange(start, end);
+    return res.json({ visitors: visitors.map(serializeVisitor) });
+  }
+
   if (date) {
     const start = new Date(`${date}T00:00:00`);
     if (Number.isNaN(start.getTime())) throw ApiError.badRequest('Invalid date — expected YYYY-MM-DD');
