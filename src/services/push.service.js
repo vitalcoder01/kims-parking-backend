@@ -183,7 +183,17 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, tag, 
       priority: 'high',
       ttl,
       notification: {
-        channelId: 'kims_parking_ring_v2',
+        // MUST match RING_CHANNEL_ID in the app's notifications.ts, and the
+        // manifest's default_notification_channel_id.
+        //
+        // This was left on _v2 after the app moved to _v3, and that single
+        // mismatch is what broke the killed-state alarm: Play Services
+        // rendered this message against a channel the device had never
+        // created, so Android dropped it or demoted it to system defaults.
+        // The manifest fallback pointed at the same dead id, so there was
+        // nothing to catch it. Changing the app's channel means changing all
+        // three, together.
+        channelId: 'kims_parking_ring_v4',
         ...(trayTag ? { tag: trayTag } : {}),
       },
     },
