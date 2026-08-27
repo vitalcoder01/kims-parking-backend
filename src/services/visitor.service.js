@@ -11,7 +11,7 @@ const runSerializable = require('../utils/runSerializable');
 // be circular and one side would see an empty object.
 function taskService() { return require('./task.service'); }
 const whatsapp = require('./whatsapp.service');
-const { serializeVisitor } = require('../utils/serialize');
+const { serializeVisitor, serializeSlot } = require('../utils/serialize');
 
 // Public tracking links carry either the publicToken (a non-numeric cuid)
 // or, for old-style callers, the raw numeric id — `id` is now an Int
@@ -668,6 +668,75 @@ async function markRetrieved(visitorId) {
   return prisma.visitor.findUnique({ where: { id: visitorId }, include: visitorInclude });
 }
 
+/*
+ * Valet: the car is gone and nobody ever asked for it.
+ *
+ * The counterpart to task.service's closeParkedSession, for visitors. It
+ * cannot reuse that one: closeParkedSession requires a park task at
+ * 'completed', and a visitor's linked task is frequently not in that state,
+ * so wiring the button to it would have thrown on the common case.
+ *
+ * It is also NOT cancelVisitor, which asserts 'pending' — that is the
+ * no-show path, for a token issued before the key was ever taken. This is
+ * the opposite situation: the car WAS parked, occupied a bay all day, and
+ * left without a retrieval ever being raised. Slots are the scarce resource
+ * here, so a session nobody will ever close by the normal route has to be
+ * closable by hand or the bay is lost until someone edits the database.
+ *
+ * Recorded as 'cancelled' rather than 'retrieved' on purpose. It did not go
+ * through a retrieval — no driver, no handover, nobody confirmed anything —
+ * and recording it as a normal completion would quietly inflate the
+ * retrieval counts and drag the timing baselines that the analytics and the
+ * co-pilot's thresholds are built on. The cancelReason says which kind of
+ * cancellation it was.
+ */
+async function closeParkedVisitor(visitorId) {
+  const existing = await prisma.visitor.findUnique({ where: { id: visitorId } });
+  if (!existing) throw ApiError.notFound('Visitor not found');
+  assertTransition(existing, ['parked'], 'close parked session');
+
+  const result = await runSerializable(async (tx) => {
+    let freedSlot = null;
+
+    // Free the bay only if this visitor still actually holds it. The slot may
+    // already have been released (a cancelled linked task, a manual fix), and
+    // blindly freeing it could hand an occupied bay to the next car.
+    if (existing.slotId) {
+      const slot = await tx.parkingSlot.findUnique({ where: { id: existing.slotId } });
+      if (slot?.status === 'occupied' && slot.carNumber === existing.carNumber) {
+        freedSlot = await tx.parkingSlot.update({
+          where: { id: existing.slotId },
+          data: { status: 'free', taskId: null, carNumber: null, doctorId: null },
+        });
+      }
+    }
+
+    // Any still-live linked task goes with it, or the visitor closes while a
+    // task keeps pointing at a session that no longer exists — the same
+    // orphaned-record class fixed elsewhere in this file.
+    await tx.parkingTask.updateMany({
+      where: { visitorId, status: { notIn: ['completed', 'cancelled'] } },
+      data: { status: 'cancelled', completedAt: new Date(), isCurrent: false },
+    });
+
+    const updated = await tx.visitor.update({
+      where: { id: visitorId },
+      data: { status: 'cancelled', cancelledAt: new Date(), cancelReason: 'left_without_retrieval' },
+      include: visitorInclude,
+    });
+    return { updated, freedSlot };
+  });
+
+  cache.invalidate('visitors:');
+  cache.invalidate('slots:');
+  emitVisitor(result.updated);
+  // emitAll (not emitToAll — that does not exist), and serialized like every
+  // other slot emit, or clients receive a raw Prisma row in a shape they
+  // do not parse.
+  if (result.freedSlot) realtime.emitAll('slot:patch', serializeSlot(result.freedSlot));
+  return result.updated;
+}
+
 // Valet: confirms the visitor actually came and took the car — the only
 // thing that finally closes out a retrieval, mirroring task.service.js's
 // confirmDelivered for staff/doctor tasks. Delegates to it so the linked
@@ -713,6 +782,7 @@ async function trackByPublicToken(idOrToken) {
 }
 
 module.exports = {
+  closeParkedVisitor,
   formatPlate,
   searchVisitors,
   getByPublicToken,

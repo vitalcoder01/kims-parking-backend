@@ -127,6 +127,15 @@ const cancel = asyncHandler(async (req, res) => {
   res.json({ visitor: serializeVisitor(visitor) });
 });
 
+// Valet: the car is gone and nobody ever asked for it. Frees the bay and
+// closes the session — see visitor.service closeParkedVisitor for why this is
+// neither cancelVisitor (which is the no-show path, 'pending' only) nor
+// closeParkedSession (which needs a park task at 'completed').
+const closeParked = asyncHandler(async (req, res) => {
+  const visitor = await visitorService.closeParkedVisitor(parseId(req.params.id));
+  res.json({ visitor: serializeVisitor(visitor) });
+});
+
 // Valet: "Bring my car back" — the key is already with a driver, so this
 // isn't a cancel/no-show anymore (see visitor.service.js's recallVisitor).
 const recall = asyncHandler(async (req, res) => {
@@ -205,4 +214,4 @@ const track = asyncHandler(async (req, res) => {
 });
 
 
-module.exports = { search, requestVisitorRetrieval, suggestPlates, list, create, update, assignDriver, cancelAssignment, accept, reject, pickup, cancel, recall, park, assignRetrievalDriver, retrieve, confirmDelivered, track };
+module.exports = { closeParked, search, requestVisitorRetrieval, suggestPlates, list, create, update, assignDriver, cancelAssignment, accept, reject, pickup, cancel, recall, park, assignRetrievalDriver, retrieve, confirmDelivered, track };

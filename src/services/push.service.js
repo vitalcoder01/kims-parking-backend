@@ -204,7 +204,7 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, tag, 
         // Killed-state alarms are rendered by Play Services against a channel
         // the device already created, so the LEVEL has to choose the channel
         // here — the app is not running to choose it.
-        channelId: alarmLevel === 'long' ? 'kims_parking_ring_v4' : 'kims_parking_ring_short_v1',
+        channelId: alarmLevel === 'long' ? 'kims_parking_ring_v5' : 'kims_parking_ring_short_v2',
         ...(trayTag ? { tag: trayTag } : {}),
       },
     },
