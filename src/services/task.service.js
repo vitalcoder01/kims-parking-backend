@@ -393,9 +393,12 @@ function notifyRetrievalOwner(task) {
   // parked before ownership existed, or an owner whose account is gone) it
   // goes to the floor — correct, not a fallback: an unowned car still has to
   // be retrieved.
+  // alarmLevel 'long': a doctor or staff member has asked for their car and
+  // is standing there waiting. This is what the 20-second ring exists for;
+  // everything else a valet receives is a reminder and rings briefly.
   return notificationService.push(owner
-    ? { targetRole: `valet:${owner}`, targetUserId: owner, title: '🚗 Car requested — your session', body, type: 'alarm' }
-    : { targetRole: 'valet', title: '🚗 Car requested', body, type: 'alarm' });
+    ? { targetRole: `valet:${owner}`, targetUserId: owner, title: '🚗 Car requested — your session', body, type: 'alarm', alarmLevel: 'long' }
+    : { targetRole: 'valet', title: '🚗 Car requested', body, type: 'alarm', alarmLevel: 'long' });
 }
 
 /**
@@ -739,6 +742,9 @@ function notifyDriverAssigned(task) {
       ? `Retrieve ${task.carNumber} from slot ${task.slotId} for ${ownerLabel(task, 'a guest')}.`
       : `Collect key from valet for ${ownerLabel(task, 'a guest')}'s car (${task.carNumber}).`,
     type: 'alarm',
+      // 'long' too: a driver's assignment is the one alert their whole job
+      // depends on noticing, and it expires if they miss it.
+      alarmLevel: 'long',
     // Job-scoped, so the expiry notice the watchdog sends replaces this entry
     // rather than leaving a live-looking "Task Assigned!" in the tray next to
     // it. See acceptWatchdog.fireTaskTimeout.

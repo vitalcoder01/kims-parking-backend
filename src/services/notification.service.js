@@ -11,12 +11,40 @@ const { serializeNotification } = require('../utils/serialize');
 // Creating a notification now also (a) emits it over the socket to exactly
 // the clients it targets — this is what makes phones ring in real time —
 // and (b) sends an FCM push so killed/rebooted apps still get it.
-async function push({ targetRole, targetUserId, title, body, type, data, tag }) {
+/*
+ * `alarmLevel` decides how long an alarm rings, and defaults to 'short'.
+ *
+ * A 20-second alarm is the right response to a person standing at the desk
+ * waiting for their car. It is the wrong response to "this job still needs a
+ * driver", which is a reminder about something the valet already knows and
+ * which repeats — twenty seconds of buzzing for that trains people to ignore
+ * the sound, which costs exactly the alerts that matter.
+ *
+ * So 'long' is opt-in and reserved for a staff member actually asking for
+ * something: a retrieval request, or an arrival heads-up. Everything else —
+ * escalations, driver reminders, recall confirmations — is 'short'.
+ * Defaulting to short means a new alert added later cannot accidentally
+ * inherit the loudest behaviour in the app.
+ */
+async function push({ targetRole, targetUserId, title, body, type, data, tag, alarmLevel }) {
   const notif = await prisma.notification.create({
     data: { targetRole, targetUserId: targetUserId ?? null, title, body, type: type || 'info' },
   });
 
-  const serialized = serializeNotification(notif);
+  /*
+   * alarmLevel rides the socket payload but is NOT a database column.
+   *
+   * It is a delivery hint — how long this one alert should ring — not a fact
+   * worth recording against the notification forever. The FCM push carries it
+   * in its data block for the same reason. Both paths therefore hand the
+   * device the same level, which matters because the socket usually beats
+   * FCM in the foreground: without it here, a retrieval request would ring
+   * the short reminder pattern whenever the app happened to be open.
+   */
+  const serialized = {
+    ...serializeNotification(notif),
+    alarmLevel: alarmLevel === 'long' ? 'long' : 'short',
+  };
   emitTargeted(targetRole, targetUserId, serialized);
   // Fire-and-forget: FCM latency/failures must never block the API response.
   // notifId ties this push to the same on-device notification the socket
@@ -25,6 +53,7 @@ async function push({ targetRole, targetUserId, title, body, type, data, tag }) 
   // message about the same job replaces this entry rather than stacking.
   pushService.pushToTarget(targetRole, targetUserId, {
     title, body, type: type || 'info', notifId: notif.id, data, tag,
+    alarmLevel: alarmLevel === 'long' ? 'long' : 'short',
   }).catch(() => {});
 
   return notif;

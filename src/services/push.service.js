@@ -113,7 +113,7 @@ async function alarmTtlMs() {
   }
 }
 
-async function pushToUsers(userIds, { title, body, type = 'info', notifId, tag, data = {} }) {
+async function pushToUsers(userIds, { title, body, type = 'info', notifId, tag, data = {}, alarmLevel = 'short' }) {
   const m = init();
   if (!m || userIds.length === 0) return;
 
@@ -141,7 +141,15 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, tag, 
   const isAlarm = type === 'alarm';
   const message = {
     tokens: tokens.map(t => t.token),
-    data: { title, body, type, ...(notifId != null ? { notifId: String(notifId) } : {}), ...data },
+    data: {
+      title, body, type,
+      // The device picks its ring channel from this. Long alarms are for a
+      // person actually waiting on someone (a retrieval or arrival request);
+      // everything else rings briefly, so the loud one keeps its meaning.
+      alarmLevel,
+      ...(notifId != null ? { notifId: String(notifId) } : {}),
+      ...data,
+    },
     ...(isAlarm ? {} : { notification: { title, body } }),
     android: {
       priority: 'high',
@@ -183,7 +191,7 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, tag, 
       priority: 'high',
       ttl,
       notification: {
-        // MUST match RING_CHANNEL_ID in the app's notifications.ts, and the
+        // MUST match the app's notifications.ts channel ids, and the
         // manifest's default_notification_channel_id.
         //
         // This was left on _v2 after the app moved to _v3, and that single
@@ -193,7 +201,10 @@ async function pushToUsers(userIds, { title, body, type = 'info', notifId, tag, 
         // The manifest fallback pointed at the same dead id, so there was
         // nothing to catch it. Changing the app's channel means changing all
         // three, together.
-        channelId: 'kims_parking_ring_v4',
+        // Killed-state alarms are rendered by Play Services against a channel
+        // the device already created, so the LEVEL has to choose the channel
+        // here — the app is not running to choose it.
+        channelId: alarmLevel === 'long' ? 'kims_parking_ring_v4' : 'kims_parking_ring_short_v1',
         ...(trayTag ? { tag: trayTag } : {}),
       },
     },

@@ -2,6 +2,7 @@ const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
 const realtime = require('../realtime');
 const { serializeArrivalNotice } = require('../utils/serialize');
+const notificationService = require('./notification.service');
 
 const include = { doctor: true };
 
@@ -27,6 +28,31 @@ async function create({ doctorId, eta }) {
     : await prisma.arrivalNotice.create({ data: { doctorId, eta }, include });
 
   emitUpsert(notice);
+
+  /*
+   * Tell the valet properly, not just over the socket.
+   *
+   * Until now an arrival notice ONLY emitted arrival:upsert, which reaches a
+   * valet whose app is open and in front of them, and nobody else. A valet
+   * with the app backgrounded — or closed, which is most of a shift — was
+   * told nothing at all, so a doctor announcing they were on their way
+   * landed in a list no one was looking at.
+   *
+   * alarmLevel 'long': this is a person saying they are coming for their
+   * car. It is one of exactly two events that earn the 20-second ring, the
+   * other being an outright retrieval request.
+   */
+  const who = doctor.name || 'A staff member';
+  notificationService.push({
+    targetRole: 'valet',
+    title: '🔔 Arrival expected',
+    body: eta ? `${who} is arriving in about ${eta} min — please have their car ready.` : `${who} is on their way in.`,
+    type: 'alarm',
+    alarmLevel: 'long',
+    // Job-scoped so a re-tapped ETA replaces the entry rather than stacking
+    // a second one — create() already refreshes instead of duplicating.
+    tag: `kims-arrival-${notice.id}`,
+  }).catch(() => {});
   return notice;
 }
 
