@@ -42,6 +42,12 @@ require('./services/jobAlerts').startEscalationSweep();
 // escalation ladder above (different cadence, different silence rule).
 require('./services/driverReminder').startSweep();
 
+// Once-a-day summary of client faults, delivered over WhatsApp (and pushed to
+// admins who have the app). The point of the WhatsApp path is that it needs
+// neither the app nor a laptop — until now every crash report ended in a
+// table nobody was looking at. Hour is FAULT_DIGEST_HOUR, local, default 20.
+require('./services/faultDigest').startDigest();
+
 async function shutdown(signal) {
   // eslint-disable-next-line no-console
   console.log(`\n[kims-parking-backend] ${signal} received, shutting down...`);

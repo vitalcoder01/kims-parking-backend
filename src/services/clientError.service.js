@@ -26,7 +26,7 @@ async function record({fingerprint, platform, appVersion, name, message, stack, 
   const existing = await prisma.clientError.findUnique({where: {fingerprint}});
 
   if (!existing) {
-    return prisma.clientError.create({
+    const created = await prisma.clientError.create({
       data: {
         fingerprint,
         platform,
@@ -39,6 +39,17 @@ async function record({fingerprint, platform, appVersion, name, message, stack, 
         userCount: userId ? 1 : 0,
       },
     });
+
+    /*
+     * Reach the people who can fix it, rather than waiting to be asked.
+     *
+     * Only on create: a fault that fires four hundred times sends exactly one
+     * message, and every later occurrence is folded into the daily digest.
+     * Deliberately not awaited — a reporting pipeline must never be able to
+     * fail or delay the request that triggered it.
+     */
+    require('./faultDigest').notifyNewFault(created).catch(() => {});
+    return created;
   }
 
   /*
