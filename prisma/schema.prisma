@@ -422,3 +422,42 @@ enum VehicleType {
   car
   bike
 }
+
+/// One row per DISTINCT client fault, not per occurrence.
+///
+/// A crash loop produces thousands of identical errors. Storing each one
+/// gives a table nobody can read and a bill nobody wants; storing a
+/// fingerprint with a counter gives the answer people actually ask —
+/// "is this still happening, to how many people, since which version?"
+///
+/// The fingerprint is hashed client-side from message + top frame + app
+/// version, so the same fault from fifty phones collapses into one row and
+/// the same fault in a NEW release deliberately does not (that is a
+/// regression, and it should surface as new).
+///
+/// Deliberately carries no free-text user data. See the scrubber in the
+/// clients: plates, names and phone numbers are stripped before send, because
+/// an error string in this app can easily contain a visitor's details and a
+/// diagnostics table is the last place those should accumulate.
+model ClientError {
+  id           Int      @id @default(autoincrement())
+  fingerprint  String   @unique
+  platform     String   // 'android' | 'web'
+  appVersion   String
+  name         String   // e.g. 'Error', 'TypeError'
+  message      String   @db.Text
+  stack        String?  @db.Text
+  /// Which screen it happened on, when the client can name one.
+  screen       String?
+  /// Roles that have hit it — tells you whether it is everyone or just valets.
+  roles        String[] @default([])
+  /// Distinct users affected. Counted, never identified.
+  userCount    Int      @default(1)
+  count        Int      @default(1)
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  resolvedAt   DateTime?
+
+  @@index([lastSeenAt])
+  @@index([resolvedAt])
+}
