@@ -53,6 +53,12 @@ const V1_9_17 = release(
   'Fixes screens occasionally showing older information — two refreshes could overwrite each other, and a live update could be undone by a refresh already in flight. Adds a quiet on-screen assistant that watches for problems and reports faults automatically.',
 );
 
+const V1_9_18 = release(
+  52,
+  '1.9.18',
+  'Alarms now ring and vibrate for the full 20 seconds even when the app is closed, with a new alert tone. Reminders ring briefly instead, so the long alarm means someone is actually waiting. Adds an on-screen assistant that watches for problems, checks why alerts might not be reaching you, and reports faults automatically.',
+);
+
 // ── Channels ─────────────────────────────────────────────────────────────
 /*
  * To ship to one role: add the release constant above, then point that
@@ -74,11 +80,11 @@ const V1_9_17 = release(
  * someone complains they never got an update.
  */
 const BY_ROLE = {
-  admin: V1_9_17,
-  valet: V1_9_17,
-  driver: V1_9_17,
-  doctor: V1_9_17,
-  staff: V1_9_17,
+  admin: V1_9_18,
+  valet: V1_9_18,
+  driver: V1_9_18,
+  doctor: V1_9_18,
+  staff: V1_9_18,
 };
 
 /*
@@ -90,7 +96,7 @@ const BY_ROLE = {
  * release the broadest set of users is on — it is what someone sees at the
  * login screen, before their own channel can apply.
  */
-const DEFAULT = V1_9_17;
+const DEFAULT = V1_9_18;
 
 /*
  * The floor. No build below this is allowed to keep running, whatever its
