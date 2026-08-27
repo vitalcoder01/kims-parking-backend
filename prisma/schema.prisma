@@ -460,4 +460,5 @@ model ClientError {
 
   @@index([lastSeenAt])
   @@index([resolvedAt])
+  @@map("client_errors")
 }

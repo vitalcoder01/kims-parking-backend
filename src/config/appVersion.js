@@ -47,12 +47,18 @@ const V1_9_16 = release(
   'Much smaller download — 37 MB, down from 68 MB — and a lighter app: screens no longer redraw every time a driver location update arrives. Valet records gain Today / Yesterday / This week / This month filters.',
 );
 
+const V1_9_17 = release(
+  51,
+  '1.9.17',
+  'Fixes screens occasionally showing older information — two refreshes could overwrite each other, and a live update could be undone by a refresh already in flight. Adds a quiet on-screen assistant that watches for problems and reports faults automatically.',
+);
+
 // ── Channels ─────────────────────────────────────────────────────────────
 /*
  * To ship to one role: add the release constant above, then point that
  * role's line at it. Leave every other line alone.
  *
- *   doctor: V1_9_16,     <- only doctors are prompted
+ *   doctor: V1_9_XX,     <- only doctors are prompted
  *
  * To ship to everyone, point all five lines at the same release.
  *
@@ -68,11 +74,11 @@ const V1_9_16 = release(
  * someone complains they never got an update.
  */
 const BY_ROLE = {
-  admin: V1_9_16,
-  valet: V1_9_16,
-  driver: V1_9_16,
-  doctor: V1_9_16,
-  staff: V1_9_16,
+  admin: V1_9_17,
+  valet: V1_9_17,
+  driver: V1_9_17,
+  doctor: V1_9_17,
+  staff: V1_9_17,
 };
 
 /*
@@ -84,7 +90,7 @@ const BY_ROLE = {
  * release the broadest set of users is on — it is what someone sees at the
  * login screen, before their own channel can apply.
  */
-const DEFAULT = V1_9_16;
+const DEFAULT = V1_9_17;
 
 /*
  * The floor. No build below this is allowed to keep running, whatever its
