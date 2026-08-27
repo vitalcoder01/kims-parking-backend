@@ -1015,7 +1015,7 @@ async function markRetrieved(taskId, driverId) {
       where: { id: taskId },
       // Not completed yet — the valet still has to confirm the doctor/staff
       // member actually came and took the car (see confirmDelivered below).
-      data: { status: 'delivered', trackingProgress: 0.95 },
+      data: { status: 'delivered', deliveredAt: new Date(), trackingProgress: 0.95 },
       include: taskInclude,
     });
     return { task: updatedTask, slot: freedSlot, freedDriver: freed };
@@ -1403,7 +1403,7 @@ async function markReturned(taskId, driverId) {
     const freed = await freeDriverIfStillOn(tx, existing.driverId, taskId);
     const updated = await tx.parkingTask.update({
       where: { id: taskId },
-      data: { status: 'delivered', trackingProgress: 1 },
+      data: { status: 'delivered', deliveredAt: new Date(), trackingProgress: 1 },
       include: taskInclude,
     });
     return { task: updated, freedDriver: freed };

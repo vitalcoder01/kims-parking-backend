@@ -112,6 +112,16 @@ model ParkingTask {
   // later change to the lead-time setting cannot retroactively move the
   // deadline of a request already in flight.
   retrievalReadyAt        DateTime?
+  /// When the car actually reached the owner — status became 'delivered'.
+  ///
+  /// The one timestamp that separates OUR work from THEIR wait. completedAt
+  /// is when the valet confirms the handover, which is however long after the
+  /// car arrived that the doctor took to come down. Without this,
+  /// startedAt -> completedAt conflates the driver bringing the car with the
+  /// owner not turning up, and "retrievals are slow" cannot be attributed to
+  /// either. Every honest ETA, bottleneck attribution and anomaly threshold
+  /// for the retrieval flow depends on being able to tell those apart.
+  deliveredAt             DateTime?
   trackingProgress  Float?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt

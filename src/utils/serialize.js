@@ -70,6 +70,7 @@ function serializeTask(task) {
     // recomputing a deadline the server already fixed.
     plannedDepartureAt: task.plannedDepartureAt ?? undefined,
     retrievalReadyAt: task.retrievalReadyAt ?? undefined,
+    deliveredAt: task.deliveredAt ?? undefined,
     trackingProgress: task.trackingProgress ?? undefined,
     driverLat: task.driverLat ?? undefined,
     driverLng: task.driverLng ?? undefined,

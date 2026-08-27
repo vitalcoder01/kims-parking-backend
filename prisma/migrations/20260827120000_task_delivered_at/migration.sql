@@ -1,0 +1,19 @@
+-- When the car actually reached the owner (status became 'delivered').
+--
+-- The one timestamp that separates OUR work from THEIR wait. completedAt is
+-- when the valet confirms the handover, which is however long after the car
+-- arrived that the owner took to come down. Without this,
+-- startedAt -> completedAt conflates the driver bringing the car with the
+-- owner not turning up, so "retrievals are slow" cannot be attributed to
+-- either — and every honest ETA, bottleneck attribution and anomaly threshold
+-- for the retrieval flow depends on telling those apart.
+--
+-- Purely additive: one nullable column, nothing altered or dropped. Existing
+-- rows stay NULL, which is correct — that moment was never recorded for them
+-- and inventing a value would poison the very baseline this exists to build.
+--
+-- Hand-written because `prisma migrate dev` cannot run in this project: the
+-- shadow-database replay fails on the pre-existing
+-- 20260729080000_drop_visitor_purpose, whose bare DROP COLUMN has no
+-- IF EXISTS guard. `migrate deploy` needs no shadow database.
+ALTER TABLE "parking_tasks" ADD COLUMN IF NOT EXISTS "deliveredAt" TIMESTAMP(3);
