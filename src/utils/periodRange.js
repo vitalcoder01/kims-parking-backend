@@ -29,4 +29,15 @@ function periodRange(period) {
   return { from: new Date(now.getFullYear(), 0, 1), to: new Date(now.getFullYear() + 1, 0, 1) };
 }
 
-module.exports = { PERIODS, periodRange };
+// The immediately-preceding window of the same length — "last month" for
+// period=monthly, the 7 days before this week for period=weekly, etc. Used
+// for "vs last period" KPI deltas. No previous window for 'all'/no period —
+// there's nothing before "all time".
+function previousPeriodRange(period) {
+  const current = periodRange(period);
+  if (!current) return null;
+  const spanMs = current.to.getTime() - current.from.getTime();
+  return { from: new Date(current.from.getTime() - spanMs), to: current.from };
+}
+
+module.exports = { PERIODS, periodRange, previousPeriodRange };

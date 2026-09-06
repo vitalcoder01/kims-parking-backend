@@ -14,5 +14,6 @@ router.get('/overview', ctrl.overview);
 // operational depth (slot classification, funnel bottlenecks, data
 // quality) a valet dashboard has no use for and shouldn't be able to poll.
 router.get('/intelligence', requireRole('admin'), ctrl.intelligence);
+router.get('/command-center', requireRole('admin'), ctrl.commandCenter);
 
 module.exports = router;

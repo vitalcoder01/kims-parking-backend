@@ -2,7 +2,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const analyticsService = require('../services/analytics.service');
 const insightService = require('../services/insight.service');
-const { PERIODS, periodRange } = require('../utils/periodRange');
+const { PERIODS, periodRange, previousPeriodRange } = require('../utils/periodRange');
 
 function parsePeriod(req) {
   const { period } = req.query;
@@ -38,4 +38,43 @@ const intelligence = asyncHandler(async (req, res) => {
   res.json({ period, overview: overviewData, slots, taskFunnel, notifications, dataQuality, anomalies, insights });
 });
 
-module.exports = { overview, intelligence };
+// Everything the desktop admin command-center dashboard needs, in one
+// fetch: the existing overview/intelligence data plus activity trend,
+// weekday×hour heatmap, funnel volumes, visitor intelligence, the 7-category
+// anomaly radar, period-over-period KPI deltas, and a documented
+// operational-health score computed from the above (see
+// analyticsService.operationalHealth). Admin-only.
+const commandCenter = asyncHandler(async (req, res) => {
+  const period = parsePeriod(req);
+  const range = periodRange(period);
+  const previousRange = previousPeriodRange(period);
+
+  const [
+    overviewData, slots, taskFunnel, taskFunnelVolume, notifications, dataQuality, anomalies,
+    activityTrend, demandHeatmap, visitorIntelligence, anomalyRadar, kpiComparison,
+  ] = await Promise.all([
+    analyticsService.overview(range, period),
+    analyticsService.slotIntelligence(range),
+    analyticsService.taskFunnel(range),
+    analyticsService.taskFunnelVolume(range),
+    analyticsService.notificationIntelligence(range),
+    analyticsService.dataQuality(),
+    analyticsService.anomalies(),
+    analyticsService.activityTrend(range),
+    analyticsService.demandHeatmap(range),
+    analyticsService.visitorIntelligence(range),
+    analyticsService.anomalyRadar(14),
+    analyticsService.kpiComparison(range, previousRange),
+  ]);
+
+  const insights = insightService.buildInsights({ overview: overviewData, slots, taskFunnel, notifications, dataQuality, anomalies });
+  const health = analyticsService.operationalHealth(insights, dataQuality);
+
+  res.json({
+    period, overview: overviewData, slots, taskFunnel, taskFunnelVolume, notifications, dataQuality,
+    anomalies, activityTrend, demandHeatmap, visitorIntelligence, anomalyRadar, kpiComparison,
+    insights, health,
+  });
+});
+
+module.exports = { overview, intelligence, commandCenter };
