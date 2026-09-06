@@ -1,46 +1,41 @@
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const analyticsService = require('../services/analytics.service');
+const insightService = require('../services/insight.service');
+const { PERIODS, periodRange } = require('../utils/periodRange');
 
-// Period boundaries computed in the server's own local time — same
-// convention Attendance already uses for "today" (see admin.service.js),
-// so "This Week"/"This Month" here lines up with what the rest of the app
-// already means by those words instead of introducing a second, UTC-based
-// notion of a day.
-const PERIODS = ['daily', 'weekly', 'monthly', 'yearly', 'all'];
-
-function periodRange(period) {
-  if (!period || period === 'all') return null;
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if (period === 'daily') {
-    return { from: startOfToday, to: new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000) };
-  }
-  if (period === 'weekly') {
-    // Week starts Monday — matches the attendance calendar's own week
-    // rendering (WEEKDAYS starts 'S' for the grid header, but the
-    // operational week here follows the hospital's Mon-Sun shift pattern).
-    const day = startOfToday.getDay(); // 0=Sun..6=Sat
-    const diffToMonday = day === 0 ? 6 : day - 1;
-    const from = new Date(startOfToday.getTime() - diffToMonday * 24 * 60 * 60 * 1000);
-    return { from, to: new Date(from.getTime() + 7 * 24 * 60 * 60 * 1000) };
-  }
-  if (period === 'monthly') {
-    const from = new Date(now.getFullYear(), now.getMonth(), 1);
-    const to = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-    return { from, to };
-  }
-  // yearly
-  return { from: new Date(now.getFullYear(), 0, 1), to: new Date(now.getFullYear() + 1, 0, 1) };
-}
-
-const overview = asyncHandler(async (req, res) => {
+function parsePeriod(req) {
   const { period } = req.query;
   if (period && !PERIODS.includes(period)) {
     throw ApiError.badRequest(`period must be one of: ${PERIODS.join(', ')}`);
   }
+  return period || 'all';
+}
+
+const overview = asyncHandler(async (req, res) => {
+  const period = parsePeriod(req);
   const range = periodRange(period);
-  res.json({ ...(await analyticsService.overview(range, period || 'all')), period: period || 'all' });
+  res.json({ ...(await analyticsService.overview(range, period)), period });
 });
 
-module.exports = { overview };
+// Bundles slot intelligence, the task funnel, notification intelligence,
+// data quality and computed insights into one response — the admin
+// Intelligence screen's single fetch. Kept separate from /overview (which
+// valets also use) since everything here is admin-only operational detail
+// a valet has no use for.
+const intelligence = asyncHandler(async (req, res) => {
+  const period = parsePeriod(req);
+  const range = periodRange(period);
+  const [overviewData, slots, taskFunnel, notifications, dataQuality, anomalies] = await Promise.all([
+    analyticsService.overview(range, period),
+    analyticsService.slotIntelligence(range),
+    analyticsService.taskFunnel(range),
+    analyticsService.notificationIntelligence(range),
+    analyticsService.dataQuality(),
+    analyticsService.anomalies(),
+  ]);
+  const insights = insightService.buildInsights({ overview: overviewData, slots, taskFunnel, notifications, dataQuality, anomalies });
+  res.json({ period, overview: overviewData, slots, taskFunnel, notifications, dataQuality, anomalies, insights });
+});
+
+module.exports = { overview, intelligence };

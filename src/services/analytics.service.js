@@ -169,4 +169,255 @@ async function overview(range, period) {
   };
 }
 
-module.exports = { overview };
+function completedAtFilter(range) {
+  if (!range?.from && !range?.to) return {};
+  return {
+    completedAt: {
+      ...(range.from && { gte: range.from }),
+      ...(range.to && { lt: range.to }),
+    },
+  };
+}
+
+// ── Slot intelligence ────────────────────────────────────────────────────
+// Per-slot usage within the period, classified relative to the mean usage
+// across all slots. "Usage" is a completed PARK job landing on that slot —
+// the same definition blockUtilization above already uses, just broken out
+// per slot instead of per block.
+//
+// This is DERIVED, not measured: true occupied-duration/idle-time/turnover
+// would need a slot-state history table, which the schema does not have
+// (ParkingSlot stores only CURRENT status, never a log of past states).
+// Usage count and last-used are real; a duration figure would be inference
+// dressed up as fact, so this deliberately does not compute one — see the
+// `note` field, which the UI should surface rather than hide.
+async function slotIntelligence(range) {
+  const [parkTasks, slots] = await Promise.all([
+    prisma.parkingTask.findMany({
+      where: { status: 'completed', type: 'park', ...completedAtFilter(range) },
+      select: { slotId: true, completedAt: true },
+    }),
+    prisma.parkingSlot.findMany({ select: { id: true, block: true, number: true, status: true } }),
+  ]);
+
+  const usageBySlot = new Map();
+  const lastUseBySlot = new Map();
+  for (const t of parkTasks) {
+    if (!t.slotId) continue;
+    usageBySlot.set(t.slotId, (usageBySlot.get(t.slotId) ?? 0) + 1);
+    const prev = lastUseBySlot.get(t.slotId);
+    if (t.completedAt && (!prev || t.completedAt > prev)) lastUseBySlot.set(t.slotId, t.completedAt);
+  }
+
+  const counts = slots.map(s => usageBySlot.get(s.id) ?? 0);
+  const mean = counts.length ? counts.reduce((a, b) => a + b, 0) / counts.length : 0;
+
+  // Thresholds are relative to the fleet's own mean, not an arbitrary
+  // fixed number — "high" on a 5-slot lot and a 500-slot lot mean
+  // different absolute counts, but the same relative story.
+  function classify(usage) {
+    if (mean === 0) return usage > 0 ? 'NORMAL' : 'NO_DATA';
+    if (usage === 0) return 'UNDERUTILIZED';
+    if (usage >= mean * 1.75) return 'OVERLOADED';
+    if (usage >= mean * 1.25) return 'HIGH';
+    if (usage <= mean * 0.5) return 'UNDERUTILIZED';
+    return 'NORMAL';
+  }
+
+  const perSlot = slots
+    .map(s => {
+      const usage = usageBySlot.get(s.id) ?? 0;
+      return {
+        id: s.id,
+        block: s.block,
+        number: s.number,
+        currentStatus: s.status,
+        usageCount: usage,
+        lastUsedAt: lastUseBySlot.get(s.id)?.toISOString() ?? null,
+        classification: classify(usage),
+      };
+    })
+    .sort((a, b) => b.usageCount - a.usageCount);
+
+  return {
+    meanUsage: Math.round(mean * 10) / 10,
+    totalSlots: slots.length,
+    slots: perSlot,
+    underutilizedCount: perSlot.filter(s => s.classification === 'UNDERUTILIZED').length,
+    overloadedCount: perSlot.filter(s => s.classification === 'OVERLOADED').length,
+    note: 'Usage count and last-used are measured from completed park jobs in this period. Occupied-duration, idle-time and turnover cannot be computed — the database records only a slot\'s CURRENT status, not a history of past state changes.',
+  };
+}
+
+// ── Task funnel ──────────────────────────────────────────────────────────
+// Stage-to-stage average minutes across the completed task lifecycle,
+// computed separately for park vs retrieve since they don't share a
+// lifecycle shape (a park job has no acceptedAt/startedAt/deliveredAt
+// stage; a retrieve does). A stage whose sample is too small to trust
+// (<5 rows with both timestamps set) is still reported but excluded from
+// bottleneck detection, so two data points can't crown a "bottleneck".
+async function taskFunnel(range) {
+  const tasks = await prisma.parkingTask.findMany({
+    where: { status: 'completed', ...completedAtFilter(range) },
+    select: {
+      type: true, requestedAt: true, assignedAt: true, acceptedAt: true,
+      keyCollectedAt: true, startedAt: true, deliveredAt: true, completedAt: true,
+    },
+  });
+
+  const park = tasks.filter(t => t.type === 'park');
+  const retrieve = tasks.filter(t => t.type === 'retrieve');
+
+  const PARK_STAGES = [
+    { key: 'assigned_to_key', label: 'Assigned → key collected', from: 'assignedAt', to: 'keyCollectedAt' },
+    { key: 'key_to_parked', label: 'Key collected → parked', from: 'keyCollectedAt', to: 'completedAt' },
+  ];
+  const RETRIEVE_STAGES = [
+    { key: 'requested_to_assigned', label: 'Requested → assigned', from: 'requestedAt', to: 'assignedAt' },
+    { key: 'assigned_to_accepted', label: 'Assigned → accepted', from: 'assignedAt', to: 'acceptedAt' },
+    { key: 'accepted_to_started', label: 'Accepted → driver started', from: 'acceptedAt', to: 'startedAt' },
+    { key: 'started_to_delivered', label: 'Started → delivered to owner', from: 'startedAt', to: 'deliveredAt' },
+    // The one gap this schema previously couldn't see — see ParkingTask.deliveredAt.
+    { key: 'delivered_to_confirmed', label: 'Delivered → confirmed (owner pickup lag)', from: 'deliveredAt', to: 'completedAt' },
+  ];
+
+  function buildStages(rows, stages) {
+    return stages.map(s => {
+      const sampleSize = rows.filter(r => r[s.from] && r[s.to]).length;
+      return { key: s.key, label: s.label, avgMinutes: avgMinutes(rows, s.from, s.to), sampleSize };
+    });
+  }
+
+  function bottleneckOf(stages) {
+    const usable = stages.filter(s => s.avgMinutes != null && s.sampleSize >= 5);
+    if (!usable.length) return null;
+    return usable.reduce((worst, s) => (s.avgMinutes > worst.avgMinutes ? s : worst));
+  }
+
+  const parkStages = buildStages(park, PARK_STAGES);
+  const retrieveStages = buildStages(retrieve, RETRIEVE_STAGES);
+
+  return {
+    park: { stages: parkStages, sampleSize: park.length, bottleneck: bottleneckOf(parkStages) },
+    retrieve: { stages: retrieveStages, sampleSize: retrieve.length, bottleneck: bottleneckOf(retrieveStages) },
+  };
+}
+
+// ── Notification intelligence ────────────────────────────────────────────
+async function notificationIntelligence(range) {
+  const where = {};
+  if (range?.from || range?.to) {
+    where.createdAt = {
+      ...(range.from && { gte: range.from }),
+      ...(range.to && { lt: range.to }),
+    };
+  }
+  const notifications = await prisma.notification.findMany({
+    where, select: { type: true, targetRole: true, createdAt: true },
+  });
+
+  const byType = {};
+  const byRole = {};
+  const byDay = new Map();
+  for (const n of notifications) {
+    byType[n.type] = (byType[n.type] ?? 0) + 1;
+    byRole[n.targetRole] = (byRole[n.targetRole] ?? 0) + 1;
+    const day = n.createdAt.toISOString().slice(0, 10);
+    byDay.set(day, (byDay.get(day) ?? 0) + 1);
+  }
+  const dailyCounts = [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, count]) => ({ date, count }));
+
+  const counts = dailyCounts.map(d => d.count);
+  const mean = counts.length ? counts.reduce((a, b) => a + b, 0) / counts.length : 0;
+  // A "spike" needs both a real multiple of the mean AND an absolute floor,
+  // so a quiet stretch with 1-2 notifications/day doesn't register noise
+  // as a spike the moment one day hits 3.
+  const spikes = mean > 0 ? dailyCounts.filter(d => d.count >= Math.max(10, mean * 2)) : [];
+
+  return { total: notifications.length, byType, byRole, dailyCounts, meanPerDay: Math.round(mean * 10) / 10, spikes };
+}
+
+// ── Data quality ──────────────────────────────────────────────────────────
+// Grounded in what the database can actually tell us is wrong, not a
+// generic checklist. Client-side crashes reuse the same client_errors table
+// the admin diagnostics endpoint already reads (see clientError.service) —
+// this is that table's data restated for the intelligence bundle, not a
+// second collection mechanism.
+async function dataQuality() {
+  const clientErrorService = require('./clientError.service');
+  const [openErrors, impossibleTimestampRows, taskSlotIds, realSlots] = await Promise.all([
+    clientErrorService.list({ includeResolved: false, limit: 10 }),
+    // completedAt earlier than createdAt is not physically possible for a
+    // row that starts its life via createdAt=now() — points at a clock
+    // issue or a bad backfill. Column-to-column comparison isn't expressible
+    // through Prisma's `where`, hence the raw query.
+    prisma.$queryRaw`SELECT COUNT(*)::int AS count FROM parking_tasks WHERE "completedAt" IS NOT NULL AND "completedAt" < "createdAt"`,
+    prisma.parkingTask.findMany({ where: { slotId: { not: null } }, distinct: ['slotId'], select: { slotId: true } }),
+    prisma.parkingSlot.findMany({ select: { id: true } }),
+  ]);
+
+  const realSlotIds = new Set(realSlots.map(s => s.id));
+  // A task pointing at a slot id that no longer exists in parking_slots —
+  // slotId has no DB-level foreign key (see schema.prisma), so this can
+  // only be caught here, not by a constraint.
+  const orphanSlotIds = taskSlotIds.map(t => t.slotId).filter(id => !realSlotIds.has(id));
+
+  return {
+    openClientErrors: openErrors.length,
+    topClientErrors: openErrors.slice(0, 5).map(e => ({
+      id: e.id, name: e.name, message: e.message, screen: e.screen,
+      count: e.count, roles: e.roles, lastSeenAt: e.lastSeenAt,
+    })),
+    impossibleTimestampCount: impossibleTimestampRows[0]?.count ?? 0,
+    orphanSlotReferenceCount: orphanSlotIds.length,
+    orphanSlotIds: orphanSlotIds.slice(0, 10),
+  };
+}
+
+// ── Anomaly detection ─────────────────────────────────────────────────────
+// Daily completed-job volume over a trailing window, flagged against that
+// same window's own mean/stddev — never a fixed magic-number threshold,
+// since "busy" means a different absolute count for every operation this
+// runs on. Needs at least 5 days of history before it will call anything
+// an anomaly; fewer than that isn't a baseline, it's a coincidence.
+async function anomalies(lookbackDays = 14) {
+  const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
+  const tasks = await prisma.parkingTask.findMany({
+    where: { status: 'completed', completedAt: { gte: since } },
+    select: { completedAt: true },
+  });
+
+  const byDay = new Map();
+  for (const t of tasks) {
+    const day = t.completedAt.toISOString().slice(0, 10);
+    byDay.set(day, (byDay.get(day) ?? 0) + 1);
+  }
+  const days = [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, count]) => ({ date, count }));
+
+  if (days.length < 5) {
+    return { lookbackDays, days, mean: null, stddev: null, anomalies: [], note: 'Not enough days of history yet to establish a baseline.' };
+  }
+
+  const counts = days.map(d => d.count);
+  const mean = counts.reduce((a, b) => a + b, 0) / counts.length;
+  const variance = counts.reduce((a, b) => a + (b - mean) ** 2, 0) / counts.length;
+  const stddev = Math.sqrt(variance);
+
+  const found = stddev > 0
+    ? days.filter(d => Math.abs(d.count - mean) > 2 * stddev)
+    : [];
+
+  return {
+    lookbackDays,
+    days,
+    mean: Math.round(mean * 10) / 10,
+    stddev: Math.round(stddev * 10) / 10,
+    anomalies: found.map(d => ({
+      date: d.date, count: d.count,
+      direction: d.count > mean ? 'high' : 'low',
+      deviationStdDevs: Math.round(((d.count - mean) / (stddev || 1)) * 10) / 10,
+    })),
+  };
+}
+
+module.exports = { overview, slotIntelligence, taskFunnel, notificationIntelligence, dataQuality, anomalies };

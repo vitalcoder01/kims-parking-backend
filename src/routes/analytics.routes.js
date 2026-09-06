@@ -10,5 +10,9 @@ const router = express.Router();
 router.use(requireAuth, requireRole('valet', 'admin'));
 
 router.get('/overview', ctrl.overview);
+// Admin-only — narrows the router-level valet+admin gate above. This is
+// operational depth (slot classification, funnel bottlenecks, data
+// quality) a valet dashboard has no use for and shouldn't be able to poll.
+router.get('/intelligence', requireRole('admin'), ctrl.intelligence);
 
 module.exports = router;
