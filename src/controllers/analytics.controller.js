@@ -41,9 +41,11 @@ const intelligence = asyncHandler(async (req, res) => {
 // Everything the desktop admin command-center dashboard needs, in one
 // fetch: the existing overview/intelligence data plus activity trend,
 // weekday×hour heatmap, funnel volumes, visitor intelligence, the 7-category
-// anomaly radar, period-over-period KPI deltas, and a documented
-// operational-health score computed from the above (see
-// analyticsService.operationalHealth). Admin-only.
+// anomaly radar, period-over-period KPI deltas, real operational-friction
+// counts (driver no-response, assignment expiry, recalls, escalations,
+// recovery broadcasts, cancellation rate — see analyticsService.
+// operationalFriction), and a documented operational-health score computed
+// from the above (see analyticsService.operationalHealth). Admin-only.
 const commandCenter = asyncHandler(async (req, res) => {
   const period = parsePeriod(req);
   const range = periodRange(period);
@@ -51,7 +53,7 @@ const commandCenter = asyncHandler(async (req, res) => {
 
   const [
     overviewData, slots, taskFunnel, taskFunnelVolume, notifications, dataQuality, anomalies,
-    activityTrend, demandHeatmap, visitorIntelligence, anomalyRadar, kpiComparison,
+    activityTrend, demandHeatmap, visitorIntelligence, anomalyRadar, kpiComparison, operationalFriction,
   ] = await Promise.all([
     analyticsService.overview(range, period),
     analyticsService.slotIntelligence(range),
@@ -65,6 +67,7 @@ const commandCenter = asyncHandler(async (req, res) => {
     analyticsService.visitorIntelligence(range),
     analyticsService.anomalyRadar(14),
     analyticsService.kpiComparison(range, previousRange),
+    analyticsService.operationalFriction(range),
   ]);
 
   const insights = insightService.buildInsights({ overview: overviewData, slots, taskFunnel, notifications, dataQuality, anomalies });
@@ -73,7 +76,7 @@ const commandCenter = asyncHandler(async (req, res) => {
   res.json({
     period, overview: overviewData, slots, taskFunnel, taskFunnelVolume, notifications, dataQuality,
     anomalies, activityTrend, demandHeatmap, visitorIntelligence, anomalyRadar, kpiComparison,
-    insights, health,
+    operationalFriction, insights, health,
   });
 });
 

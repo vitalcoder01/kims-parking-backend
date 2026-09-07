@@ -751,8 +751,87 @@ function operationalHealth(insights, dataQuality) {
   return { score, band, breakdown: { warnInsights: warnCount, openClientErrors: dataQuality.openClientErrors } };
 }
 
+
+// ── Operational friction ────────────────────────────────────────────────
+// Real failure/friction events the app already records but has never
+// surfaced anywhere — discovered by mining an actual production data
+// export (a Supabase CSV snippet), not invented. Two independent sources,
+// cross-checkable against each other:
+//
+//   1. Notification titles — the app sends a FIXED, hardcoded title for
+//      each of these events (verified against the literal strings in
+//      acceptWatchdog.js/driverReminder.js/jobAlerts.js/task.service.js,
+//      not guessed from the export), so an exact `title` match is a
+//      precise count of how many times that event fired.
+//   2. ParkingTask's own lifecycle columns (recalledAt/escalatedAt/
+//      recoveryBroadcastAt/status), which exist independently of whether
+//      a notification happened to be read or is still in the table.
+//
+// Both are scoped the same way as the rest of this file — by
+// completedAt, so a task/notification counts toward the period it
+// actually finished in, matching the "today" convention used everywhere
+// else in the admin console.
+const FRICTION_TITLES = {
+  driverDidNotAccept: '⚠️ Driver did not accept',
+  assignmentExpired: 'Assignment expired',
+  stillNeedsDriver: '🔑 Still needs a driver',
+  jobStillNeedsDriver: '⚠️ Job still needs a driver',
+  pickupStillNeedsDriver: '⚠️ Pickup still needs a driver',
+  retrievalNeedsValet: '🚗 Retrieval needs a valet',
+  jobRecalled: '🔔 Job Recalled — Bring the Car Back',
+};
+
+async function operationalFriction(range) {
+  const cf = completedAtFilter(range);
+  const notifWhere = {};
+  if (range?.from || range?.to) {
+    notifWhere.createdAt = {
+      ...(range.from && { gte: range.from }),
+      ...(range.to && { lt: range.to }),
+    };
+  }
+
+  const [notifRows, totalTasks, cancelledTasks, escalatedTasks, recalledTasks, recoveryBroadcasts, retrieveTasks] = await Promise.all([
+    prisma.notification.groupBy({
+      by: ['title'],
+      where: { ...notifWhere, title: { in: Object.values(FRICTION_TITLES) } },
+      _count: true,
+    }),
+    prisma.parkingTask.count({ where: { ...cf } }),
+    prisma.parkingTask.count({ where: { status: 'cancelled', ...cf } }),
+    prisma.parkingTask.count({ where: { escalatedAt: { not: null }, ...cf } }),
+    prisma.parkingTask.count({ where: { recalledAt: { not: null }, ...cf } }),
+    prisma.parkingTask.count({ where: { recoveryBroadcastAt: { not: null }, ...cf } }),
+    prisma.parkingTask.count({ where: { type: 'retrieve', status: 'completed', ...cf } }),
+  ]);
+
+  const byTitle = new Map(notifRows.map(r => [r.title, r._count]));
+  const driverNoResponseCount = byTitle.get(FRICTION_TITLES.driverDidNotAccept) ?? 0;
+  const assignmentExpiredCount = byTitle.get(FRICTION_TITLES.assignmentExpired) ?? 0;
+  const unstaffedAlertCount =
+    (byTitle.get(FRICTION_TITLES.stillNeedsDriver) ?? 0) +
+    (byTitle.get(FRICTION_TITLES.jobStillNeedsDriver) ?? 0) +
+    (byTitle.get(FRICTION_TITLES.pickupStillNeedsDriver) ?? 0) +
+    (byTitle.get(FRICTION_TITLES.retrievalNeedsValet) ?? 0);
+  const jobsRecalledCount = byTitle.get(FRICTION_TITLES.jobRecalled) ?? recalledTasks;
+
+  return {
+    totalTasks,
+    cancelledTasks,
+    cancellationRatePct: totalTasks ? Math.round((cancelledTasks / totalTasks) * 1000) / 10 : 0,
+    driverNoResponseCount,
+    assignmentExpiredCount,
+    unstaffedAlertCount,
+    jobsRecalledCount,
+    escalatedTasksCount: escalatedTasks,
+    retrieveTasks,
+    recoveryBroadcastCount: recoveryBroadcasts,
+    recoveryBroadcastRatePct: retrieveTasks ? Math.round((recoveryBroadcasts / retrieveTasks) * 1000) / 10 : 0,
+  };
+}
+
 module.exports = {
   overview, slotIntelligence, taskFunnel, notificationIntelligence, dataQuality, anomalies,
   activityTrend, demandHeatmap, taskFunnelVolume, visitorIntelligence, anomalyRadar,
-  kpiComparison, operationalHealth,
+  kpiComparison, operationalHealth, operationalFriction,
 };
