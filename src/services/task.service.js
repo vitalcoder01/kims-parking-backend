@@ -253,6 +253,17 @@ async function retireCurrentTask(tx, owner) {
       ? { isCurrent: false }
       : { isCurrent: false, status: 'cancelled', completedAt: new Date() },
   });
+  // Force-cancelling a still-live task can cut it short while a driver is
+  // genuinely holding it (assigned/key_collected/in_transit) — without this,
+  // that driver stays 'busy', pointed at a now-cancelled task, forever: once
+  // this row is terminal nothing else is ever watching it again to free
+  // them. Found via a real driver stuck busy for two weeks on a task that
+  // had been superseded this way. Only the force-cancel branch needs this —
+  // an already-terminal row (the normal requestRetrieval case, retiring a
+  // just-completed park row) was freed properly whenever IT completed.
+  if (!terminal && existing.driverId) {
+    await freeDriverIfStillOn(tx, existing.driverId, existing.id);
+  }
 }
 
 async function getTask(id) {
