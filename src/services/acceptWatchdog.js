@@ -73,16 +73,17 @@ async function rehydrate() {
       where: { status: 'pending', driverId: { not: null }, acceptedAt: null },
       select: { id: true, driverId: true, driverAssignedAt: true },
     }),
-    // Two-station handoff model: tasks already auto-accepted (acceptedAt
-    // set) but whose driver hasn't sent a real GPS ping yet (still no
-    // start-anchor) — see updateLocation's auto-advance into in_transit.
-    // Re-armed on the same clock as the assignment they never moved on,
-    // same reasoning as the task/visitor timers above: a restart must not
-    // silently drop the one thing watching for "did the driver ever leave".
+    // Two-station handoff model, no-GPS era: tasks already auto-accepted
+    // (acceptedAt set) but not yet confirmed done by a valet — with no
+    // driver app and no GPS, nothing else ever advances or completes these
+    // on its own, so this is a plain "has this sat too long" check, not a
+    // "did the driver ever move" one. Re-armed on the same clock as the
+    // assignment, same reasoning as the task/visitor timers above: a
+    // restart must not silently drop the one thing watching for a stalled
+    // confirmation.
     prisma.parkingTask.findMany({
       where: {
         acceptedAt: { not: null },
-        driverStartLat: null,
         OR: [
           { type: 'park', status: 'key_collected' },
           { type: 'retrieve', status: 'assigned' },
@@ -315,32 +316,29 @@ async function cancelVisitorAssignment(visitorId) {
   return fireVisitorTimeout(visitorId, visitor.driverId);
 }
 
-// Two-station handoff model only: the driver no longer taps "accept", so
-// there's nothing left for the old accept-timeout to time out — instead
-// this watches for the driver's FIRST real GPS ping (which auto-advances
-// the task to in_transit, see task.service.js's updateLocation) and alerts
-// the owning valet if it never arrives in time. Deliberately does NOT roll
-// back the assignment the way fireTaskTimeout does: a slow GPS fix looks
-// identical to a driver who genuinely never left, and forcibly freeing the
-// driver on that guess could strand someone who IS actually en route. This
-// is a nudge for the valet to check, not an automatic reassignment.
+// Two-station handoff model, no-GPS era: the driver no longer taps "accept"
+// (or anything else — there is no driver app at all), so there's nothing
+// left for the old accept-timeout to time out, and no GPS ping to watch for
+// either. Instead this is a plain wall-clock check: has this job sat at
+// key_collected/assigned too long with no valet confirming it done? Alerts
+// the owning valet rather than rolling anything back — nobody but a valet
+// can act on this anyway, so there's nothing to automatically reassign.
 async function fireMovementTimeout(taskId, driverId) {
   const task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
-  // Already moving (or moved on/finished) by the time this fired — nothing
-  // to say. Also bails if this driver isn't even on the job anymore (a
+  // Already confirmed (or moved on) by the time this fired — nothing to
+  // say. Also bails if this driver isn't even on the job anymore (a
   // recall, cancel, or reassignment already happened).
   if (!task || task.driverId !== driverId) return;
-  const stillWaiting = task.driverStartLat == null
-    && ((task.type === 'park' && task.status === 'key_collected')
-      || (task.type === 'retrieve' && task.status === 'assigned'));
+  const stillWaiting = (task.type === 'park' && task.status === 'key_collected')
+    || (task.type === 'retrieve' && task.status === 'assigned');
   if (!stillWaiting) return;
 
   const driverName = task.driver?.user?.name ?? 'The driver';
   const owner = task.valetId ?? task.arrivalOwnerValetId ?? task.retrievalOwnerValetId;
   await notificationService.push({
     ...(owner ? { targetRole: `valet:${owner}`, targetUserId: owner } : { targetRole: 'valet' }),
-    title: '⏱️ Driver has not started moving',
-    body: `${driverName} was assigned ${task.carNumber} but hasn't started yet — check on them or reassign.`,
+    title: '⏱️ Job not confirmed yet',
+    body: `${task.carNumber} with ${driverName} hasn't been confirmed ${task.type === 'park' ? 'parked' : 'arrived'} yet — check on it.`,
     type: 'alarm',
   }).catch(() => {});
 }

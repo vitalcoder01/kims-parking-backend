@@ -815,12 +815,12 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
       // pickups/retrievals via visitor.service.js, which all delegate here)
       // now gets the driver accepted on their behalf, the instant a valet
       // assigns them. There is nothing left for the old accept-timeout to
-      // time out, so arm the movement watchdog in its place: it only fires
-      // if the driver's GPS never actually starts (see updateLocation's
-      // auto-advance into in_transit, and acceptWatchdog's
-      // fireMovementTimeout) and unlike the accept-timeout it never forces
-      // the driver off the job — a slow GPS fix looks identical to one that
-      // never came, so this only alerts, it doesn't roll anything back.
+      // time out, so arm the movement watchdog in its place: with no driver
+      // app and no GPS, it's a plain wall-clock check — has this job sat at
+      // key_collected/assigned too long with nobody confirming it done? (see
+      // acceptWatchdog's fireMovementTimeout). Like the old one it never
+      // forces the driver off the job, only alerts — the driver isn't the
+      // one who'd act on it anyway.
       const accepted = await acceptTask(taskId, driverId);
       await watchdog.arm('movement', taskId, driverId);
       return accepted;
@@ -983,10 +983,10 @@ async function markInTransit(taskId, driverId) {
   });
   cache.invalidate('tasks:');
   watchdog.disarm('task', taskId);
-  // The driver has genuinely started — the movement watchdog's only
-  // question (did they ever start moving?) is answered, whether this
-  // transition came from updateLocation's own auto-advance or a manual
-  // call.
+  // Nothing calls this in the normal no-GPS flow any more (see
+  // _completeRetrieve's widened assertTransition), but the old
+  // driver-facing /tasks/:id/in-transit route is still reachable, so this
+  // still disarms the same confirmation-stall watchdog assignDriver arms.
   watchdog.disarm('movement', taskId);
   emitTask(updated);
   await syncVisitorFromTask(updated).catch(() => {});
@@ -1128,7 +1128,13 @@ async function _completeRetrieve(taskId, driverId) {
     if (!task) throw ApiError.notFound('Task not found');
     if (driverId != null) assertOwnDriver(task, driverId);
     if (task.type !== 'retrieve') throw ApiError.conflict('Only retrieve tasks can be marked retrieved');
-    assertTransition(task, ['in_transit'], 'mark retrieved');
+    // 'assigned' is included alongside 'in_transit' because there is no
+    // driver GPS any more to ever advance a retrieval past 'assigned' on
+    // its own (see the removed updateLocation) — a retrieval now sits at
+    // 'assigned' for its whole trip, and the gate valet confirms arrival
+    // straight from there. 'in_transit' stays accepted too so a task that
+    // predates this change (or was manually advanced) still completes.
+    assertTransition(task, ['assigned', 'in_transit'], 'mark retrieved');
     let freedSlot = null;
 
     // Free the slot this retrieval was raised against. It used to also
@@ -1246,80 +1252,16 @@ async function confirmDelivered(taskId) {
   return updated;
 }
 
-// Driver: periodic GPS ping while en route. Ownership is enforced by the
-// caller (controller) — only the driver assigned to this task may update it.
-// The first ping since the last key_collected/in_transit transition becomes
-// the shared start-anchor every viewer computes trip progress from.
-// A phone sitting still still emits a fix every few seconds. Writing every
-// one of those to the task row is pure contention: it's the same row every
-// state transition (mark parked / retrieved / key collected) has to read, so
-// a constant stream of no-op writes is what was making those transitions
-// abort and surface "please try again". Skip writes that carry no new
-// information — under this threshold the stored position is already correct.
-const LOCATION_MIN_MOVE_M = 8;
-const LOCATION_MAX_STALE_MS = 20 * 1000;
-
-function metersBetween(lat1, lng1, lat2, lng2) {
-  const R = 6371000;
-  const toRad = (d) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a = Math.sin(dLat / 2) ** 2
-    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
-}
-
-async function updateLocation(taskId, lat, lng, driverId) {
-  let task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
-  if (!task) throw ApiError.notFound('Task not found');
-  assertOwnDriver(task, driverId);
-  // The driver's only job now is to accept GPS tracking and drive — there is
-  // no separate manual "start trip" tap left for them either (see
-  // assignDriver's auto-accept above). So the FIRST real location ping IS
-  // the start of the trip: auto-advance into in_transit here, reusing
-  // markInTransit's own tested transition (watchdog disarm, startedAt
-  // stamping, GPS start-anchor reset) instead of duplicating it. A task
-  // already in_transit takes this branch as a no-op every subsequent ping.
-  const canAutoStart = task.status === 'key_collected'
-    || (task.type === 'retrieve' && task.status === 'assigned');
-  if (canAutoStart) {
-    task = await markInTransit(taskId, driverId);
-  }
-  assertTransition(task, ['key_collected', 'in_transit'], 'report location');
-
-  const isFirstPing = task.driverStartLat == null || task.driverStartLng == null;
-
-  // Always write the first ping (it sets the trip's start anchor) and any
-  // real movement; otherwise only refresh periodically so viewers can still
-  // tell the feed is alive rather than stalled.
-  if (!isFirstPing && task.driverLat != null && task.driverLng != null) {
-    const moved = metersBetween(task.driverLat, task.driverLng, lat, lng);
-    const age = Date.now() - (task.locationUpdatedAt?.getTime() ?? 0);
-    if (moved < LOCATION_MIN_MOVE_M && age < LOCATION_MAX_STALE_MS) {
-      // NOTE: this is the row as read at the top of this request, and a
-      // transition (mark parked/retrieved) may have committed since. Callers
-      // must treat a location response as authoritative for the position
-      // fields ONLY — never for status. The driver standing at the slot takes
-      // this path on almost every ping, so it is the common case, not a rare
-      // one.
-      return task;
-    }
-  }
-
-  const updated = await prisma.parkingTask.update({
-    where: { id: taskId },
-    data: {
-      driverLat: lat,
-      driverLng: lng,
-      locationUpdatedAt: new Date(),
-      ...(isFirstPing && { driverStartLat: lat, driverStartLng: lng }),
-    },
-    include: taskInclude,
-  });
-  cache.invalidate('tasks:');
-  emitTask(updated);
-  return updated;
-}
+// Driver GPS reporting (updateLocation) was removed along with the driver
+// app itself — there is no driver client left to send a location ping, and
+// nothing renders one any more (the live map, the tracking page's progress
+// bar). The driverLat/driverLng/driverStartLat/driverStartLng/
+// locationUpdatedAt columns stay in the schema (harmless, unused) rather
+// than a migration to drop them; markInTransit (still used by the old
+// driver-facing /tasks/:id/in-transit route, left in place) is the only
+// remaining way a task ever reaches 'in_transit', and nothing in the normal
+// flow calls it any more either — see _completeRetrieve's widened
+// assertTransition, which now completes straight from 'assigned'.
 
 // Valet: give up on a driver who hasn't accepted yet, immediately, instead
 // of waiting out the accept-timeout window. Frees the driver and puts the
@@ -1716,7 +1658,6 @@ module.exports = {
   cancelTask,
   recallTask,
   markReturned,
-  updateLocation,
   confirmParkedByValet,
   confirmArrivedByValet,
   requestOtherStationDriver,

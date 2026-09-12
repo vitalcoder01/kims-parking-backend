@@ -251,16 +251,5 @@ const cancelMyRetrieval = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
-// Driver: live GPS ping. Only the driver assigned to this task may report a
-// position for it — otherwise any driver could spoof another's location.
-const updateLocation = asyncHandler(async (req, res) => {
-  const { lat, lng } = req.body;
-  if (typeof lat !== 'number' || typeof lng !== 'number') {
-    throw ApiError.badRequest('lat and lng (numbers) are required');
-  }
 
-  const updated = await taskService.updateLocation(parseId(req.params.id), lat, lng, callerDriverId(req));
-  res.json({ task: serializeTask(updated) });
-});
-
-module.exports = { list, get, create, gateHandoff, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, confirmParked, requestOtherStation, retrieve, confirmArrived, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder, updateLocation };
+module.exports = { list, get, create, gateHandoff, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, confirmParked, requestOtherStation, retrieve, confirmArrived, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder };
