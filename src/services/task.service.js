@@ -20,10 +20,24 @@ const { serializeTask, serializeSlot } = require('../utils/serialize');
 function emitTask(task) {
   const payload = serializeTask(task);
   const owner = task.retrievalOwnerValetId ?? task.arrivalOwnerValetId;
+  // A gate-station owner never personally holds this session's retrieval
+  // visibility either — same reasoning as isVisibleToValet/
+  // notifyRetrievalOwner/assignDriver's ownership guards: they hand keys to
+  // drivers, they never stand next to a parked car to retrieve it. Read off
+  // the already-loaded arrivalOwnerValet/retrievalOwnerValet relations
+  // (taskInclude), not a fresh query — emitTask is synchronous and called
+  // from many mutation paths, so it can't await one. Without this, the
+  // live socket update for a gate-owned retrieval request went ONLY to the
+  // gate valet's own connection (emitToUser below) — the lot valet's
+  // client, the one actually meant to act on it, never even received the
+  // task:upsert that would have put it on their screen, socket-restrict
+  // eventually clearing whatever REST poll had shown them in the meantime.
+  const ownerValetRecord = task.retrievalOwnerValetId != null ? task.retrievalOwnerValet : task.arrivalOwnerValet;
+  const ownerIsGateStation = ownerValetRecord?.valetStation === 'gate';
   // Exactly the inverse of isVisibleToValet's "open to all" test — the two
   // must agree, or the socket shows a valet something the REST list then
   // takes away on the next poll (or vice versa).
-  const restricted = task.type === 'retrieve' && owner != null && !isRetrievalOpenToAll(task);
+  const restricted = task.type === 'retrieve' && owner != null && !ownerIsGateStation && !isRetrievalOpenToAll(task);
 
   if (!restricted) {
     realtime.emitAll('task:upsert', payload);
@@ -69,12 +83,38 @@ function isRetrievalOpenToAll(task) {
   return task.recoveryBroadcastAt != null || task.escalatedAt != null;
 }
 
-function isVisibleToValet(task, valetId) {
+function isVisibleToValet(task, valetId, valetStationById) {
   if (task.type !== 'retrieve') return true;
   const owner = task.retrievalOwnerValetId ?? task.arrivalOwnerValetId;
   if (owner == null) return true;               // never had an owner — open floor
   if (owner === valetId) return true;           // theirs
+  // A gate-station owner never personally holds this session's retrieval
+  // visibility either — same reasoning already applied to
+  // notifyRetrievalOwner and assignDriver's ownership guards: they hand
+  // keys to drivers, they never stand next to a parked car to retrieve it
+  // themselves. Without this, a gate-owned retrieval request was visible
+  // ONLY to the gate valet who ran the original arrival — invisible to
+  // every lot valet, the one actually meant to see and act on it — until
+  // the job escalated. Exact reported bug: a gate valet claimed a
+  // retrieval within a second of the request while the lot valet's own
+  // list never showed it at all.
+  if (valetStationById?.get(owner) === 'gate') return true;
   return isRetrievalOpenToAll(task);
+}
+
+// Wraps isVisibleToValet with the one DB round trip it needs — a single
+// query for every distinct owner across the whole list, not one per task —
+// so the controller's list endpoint can filter a valet's view without
+// reaching into Prisma itself.
+async function filterVisibleToValet(tasks, valetId) {
+  const ownerIds = [...new Set(
+    tasks.flatMap(t => [t.retrievalOwnerValetId, t.arrivalOwnerValetId]).filter(id => id != null),
+  )];
+  const owners = ownerIds.length
+    ? await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, valetStation: true } })
+    : [];
+  const valetStationById = new Map(owners.map(o => [o.id, o.valetStation]));
+  return tasks.filter(t => isVisibleToValet(t, valetId, valetStationById));
 }
 
 /**
@@ -1652,6 +1692,7 @@ module.exports = {
   syncVisitorFromTask,
   ownerLabel,
   isVisibleToValet,
+  filterVisibleToValet,
   notifyRetrievalOwner,
   // Exported so the scheduler sweep emits through the SAME ownership-aware
   // path, rather than re-implementing who is allowed to see a retrieval.
