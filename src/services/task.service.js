@@ -385,26 +385,37 @@ function ownerLabel(task, fallback = 'Someone') {
 }
 
 async function notifyRetrievalOwner(task) {
-  const owner = task.arrivalOwnerValetId;
   const who = ownerLabel(task, 'A guest');
   const body = `${who} is leaving and needs ${task.carNumber}. Please assign a driver.`;
+  // A personal owner only holds a *private* retrieval window when they can
+  // actually act on it — a gate-station valet's job ends at handing a key to
+  // a driver; they never stand next to the parked car to assign its
+  // retrieval driver. So a gate-owned session is treated exactly like an
+  // unowned one and routed to the lot station, instead of ringing the gate
+  // valet with a job they cannot do (see the two-station handoff model).
+  const ownerId = task.arrivalOwnerValetId;
+  const ownerRecord = ownerId
+    ? await prisma.user.findUnique({ where: { id: ownerId }, select: { valetStation: true } })
+    : null;
+  const personalOwner = ownerId && ownerRecord?.valetStation !== 'gate' ? ownerId : null;
   // `valet:<id>` addresses one person; the bare role name would broadcast to
   // everyone and defeat the entire point of ownership. alarmLevel 'long': a
   // doctor or staff member has asked for their car and is standing there
   // waiting. This is what the 20-second ring exists for; everything else a
   // valet receives is a reminder and rings briefly.
-  if (owner) {
+  if (personalOwner) {
     return notificationService.push({
-      targetRole: `valet:${owner}`, targetUserId: owner,
+      targetRole: `valet:${personalOwner}`, targetUserId: personalOwner,
       title: '🚗 Car requested — your session', body, type: 'alarm', alarmLevel: 'long',
     });
   }
-  // No specific session owner (a car parked before ownership existed, or a
-  // visitor whose check-in valet's account is gone) — route to the lot
-  // station first: that's where the parked cars and the drivers who can
-  // reach them actually are (see the two-station handoff model). Falls
-  // back to broadcasting every valet on a site with no stations configured
-  // at all, so this never silently drops a request during rollout.
+  // No personal owner who can act (a gate-station owner, a car parked before
+  // ownership existed, or a visitor whose check-in valet's account is gone)
+  // — route to the lot station first: that's where the parked cars and the
+  // drivers who can reach them actually are (see the two-station handoff
+  // model). Falls back to broadcasting every valet on a site with no
+  // stations configured at all, so this never silently drops a request
+  // during rollout.
   const hasLotStation = await prisma.user.findFirst({ where: { role: 'valet', valetStation: 'lot' }, select: { id: true } });
   return notificationService.push(hasLotStation
     ? { targetRole: 'valetStation:lot', title: '🚗 Car requested', body, type: 'alarm', alarmLevel: 'long' }
@@ -585,6 +596,21 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
           throw ApiError.conflict('That driver has already accepted this job — cancel it first to reassign', 'JOB_GONE');
         }
 
+        // A gate-station arrival owner never personally holds a retrieval
+        // session's claim either: they hand keys to drivers, they don't stand
+        // next to a parked car to assign one. requestRetrieval carries the
+        // arrival owner forward onto valetId purely as continuity metadata —
+        // until someone actually acts on the retrieval, that inherited value
+        // must not be mistaken for a real claim by the gate valet. Resolved
+        // once, up front, and reused by every guard below plus the ownership
+        // claim they protect.
+        const arrivalOwnerStation = valetId && existing.type === 'retrieve' && existing.arrivalOwnerValetId != null
+          ? (await tx.user.findUnique({ where: { id: existing.arrivalOwnerValetId }, select: { valetStation: true } }))?.valetStation
+          : null;
+        const arrivalOwnerIsGate = arrivalOwnerStation === 'gate';
+        const isInheritedGateClaim = existing.type === 'retrieve' && arrivalOwnerIsGate
+          && existing.valetId === existing.arrivalOwnerValetId;
+
         // One job, one valet. Without this, two valets who both received the
         // same alert could each assign a driver: the second call is a
         // perfectly ordinary "reassign" as far as every other check is
@@ -594,8 +620,11 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
         // The claim is deliberately NOT permanent — it lifts once the job has
         // escalated (escalatedAt set), which is the point at which the owner
         // has had their window and the team is meant to pick it up. So a valet
-        // who logs off mid-job can't freeze a real car indefinitely.
-        if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt) {
+        // who logs off mid-job can't freeze a real car indefinitely. It also
+        // lifts for a retrieval whose only "claim" is the gate valet's
+        // inherited metadata (isInheritedGateClaim) — that valet was never a
+        // real claimant, so this must not block the lot valet who actually is.
+        if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt && !isInheritedGateClaim) {
           const owner = await tx.user.findUnique({ where: { id: existing.valetId }, select: { name: true } });
           throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
         }
@@ -621,11 +650,13 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
             throw ApiError.conflict(`${owner?.name ?? 'Another valet'} has accepted this retrieval`, 'JOB_GONE');
           }
           // Still inside the session owner's private window — nobody else has
-          // even been shown this yet.
+          // even been shown this yet. Skipped for a gate-station owner: see
+          // arrivalOwnerIsGate above.
           if (retrievalOwner == null
               && existing.arrivalOwnerValetId != null
               && existing.arrivalOwnerValetId !== valetId
-              && !existing.recoveryBroadcastAt) {
+              && !existing.recoveryBroadcastAt
+              && !arrivalOwnerIsGate) {
             const owner = await tx.user.findUnique({ where: { id: existing.arrivalOwnerValetId }, select: { name: true } });
             throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
           }
@@ -650,7 +681,7 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
           ? {
               retrievalOwnerValetId: valetId,
               retrievalAcceptedAt: new Date(),
-              retrievalOwnershipSource: existing.arrivalOwnerValetId === valetId ? 'OWNER' : 'RECOVERY',
+              retrievalOwnershipSource: existing.arrivalOwnerValetId === valetId || arrivalOwnerIsGate ? 'OWNER' : 'RECOVERY',
             }
           : {};
 
@@ -1537,15 +1568,44 @@ async function requestOtherStationDriver(taskId, valetId) {
   const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
   if (!task) throw ApiError.notFound('Task not found');
 
-  const result = task.type === 'retrieve'
-    ? await prisma.parkingTask.updateMany({
-        where: { id: taskId, type: 'retrieve', retrievalOwnerValetId: valetId, status: { in: ['requested', 'accepted'] } },
-        data: { retrievalOwnerValetId: null, retrievalOwnershipSource: null, status: 'accepted' },
-      })
-    : await prisma.parkingTask.updateMany({
-        where: { id: taskId, type: 'park', valetId, status: 'assigned', driverId: null },
-        data: { valetId: null, valetClaimedAt: null },
-      });
+  let result;
+  if (task.type === 'retrieve') {
+    // Eligible to hand this off if you already dynamically claimed the
+    // retrieval (retrievalOwnerValetId === you — e.g. you tried a driver who
+    // later fell through), OR nobody has claimed it yet and it currently
+    // sits with you: either personally, as the arrival owner (mirrors the
+    // private window notifyRetrievalOwner gives a non-gate owner), or
+    // generally, because it was broadcast to your whole station (mirrors
+    // notifyRetrievalOwner routing a gate-owned or unowned session to the
+    // lot station). Fresh, never-touched requests are the common case this
+    // button exists for, so this must recognize them, not just a claim that
+    // assigning a driver would have already resolved.
+    let eligible = task.retrievalOwnerValetId === valetId;
+    if (!eligible && task.retrievalOwnerValetId == null) {
+      if (task.arrivalOwnerValetId === valetId) {
+        eligible = true;
+      } else if (valet.valetStation === 'lot') {
+        const arrivalOwnerStation = task.arrivalOwnerValetId
+          ? (await prisma.user.findUnique({ where: { id: task.arrivalOwnerValetId }, select: { valetStation: true } }))?.valetStation
+          : null;
+        eligible = arrivalOwnerStation == null || arrivalOwnerStation === 'gate';
+      }
+    }
+    result = eligible
+      ? await prisma.parkingTask.updateMany({
+          where: {
+            id: taskId, type: 'retrieve', status: { in: ['requested', 'accepted'] }, driverId: null,
+            retrievalOwnerValetId: task.retrievalOwnerValetId,
+          },
+          data: { retrievalOwnerValetId: null, retrievalOwnershipSource: null, status: 'accepted' },
+        })
+      : { count: 0 };
+  } else {
+    result = await prisma.parkingTask.updateMany({
+      where: { id: taskId, type: 'park', valetId, status: 'assigned', driverId: null },
+      data: { valetId: null, valetClaimedAt: null },
+    });
+  }
   if (result.count === 0) throw ApiError.conflict('This job is not currently yours to hand off, or it already has a driver', 'JOB_GONE');
 
   const updated = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
