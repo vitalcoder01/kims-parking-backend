@@ -39,7 +39,9 @@ async function arm(kind, id, driverId, timeoutOverrideMs) {
   const timeoutMs = timeoutOverrideMs ?? await settingService.getAcceptTimeoutMs();
   const t = setTimeout(() => {
     timers.delete(key(kind, id));
-    const fire = kind === 'task' ? fireTaskTimeout : fireVisitorTimeout;
+    const fire = kind === 'task' ? fireTaskTimeout
+      : kind === 'movement' ? fireMovementTimeout
+      : fireVisitorTimeout;
     fire(id, driverId).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn(`[acceptWatchdog] ${kind} ${id} timeout handling failed:`, err.message);
@@ -62,7 +64,7 @@ async function rehydrate() {
     return Math.max(1000, timeoutMs - (Date.now() - new Date(assignedAt).getTime()));
   };
 
-  const [tasks, visitors] = await Promise.all([
+  const [tasks, visitors, moving] = await Promise.all([
     prisma.parkingTask.findMany({
       where: { status: 'assigned', driverId: { not: null }, acceptedAt: null },
       select: { id: true, driverId: true, assignedAt: true },
@@ -71,12 +73,30 @@ async function rehydrate() {
       where: { status: 'pending', driverId: { not: null }, acceptedAt: null },
       select: { id: true, driverId: true, driverAssignedAt: true },
     }),
+    // Two-station handoff model: tasks already auto-accepted (acceptedAt
+    // set) but whose driver hasn't sent a real GPS ping yet (still no
+    // start-anchor) — see updateLocation's auto-advance into in_transit.
+    // Re-armed on the same clock as the assignment they never moved on,
+    // same reasoning as the task/visitor timers above: a restart must not
+    // silently drop the one thing watching for "did the driver ever leave".
+    prisma.parkingTask.findMany({
+      where: {
+        acceptedAt: { not: null },
+        driverStartLat: null,
+        OR: [
+          { type: 'park', status: 'key_collected' },
+          { type: 'retrieve', status: 'assigned' },
+        ],
+      },
+      select: { id: true, driverId: true, acceptedAt: true },
+    }),
   ]);
 
   for (const t of tasks) await arm('task', t.id, t.driverId, remainingFor(t.assignedAt));
   for (const v of visitors) await arm('visitor', v.id, v.driverId, remainingFor(v.driverAssignedAt));
+  for (const m of moving) await arm('movement', m.id, m.driverId, remainingFor(m.acceptedAt));
 
-  const count = tasks.length + visitors.length;
+  const count = tasks.length + visitors.length + moving.length;
   if (count > 0) {
     // eslint-disable-next-line no-console
     console.log(`[acceptWatchdog] re-armed ${count} pending assignment(s) after restart`);
@@ -293,6 +313,36 @@ async function cancelVisitorAssignment(visitorId) {
   }
   disarm('visitor', visitorId);
   return fireVisitorTimeout(visitorId, visitor.driverId);
+}
+
+// Two-station handoff model only: the driver no longer taps "accept", so
+// there's nothing left for the old accept-timeout to time out — instead
+// this watches for the driver's FIRST real GPS ping (which auto-advances
+// the task to in_transit, see task.service.js's updateLocation) and alerts
+// the owning valet if it never arrives in time. Deliberately does NOT roll
+// back the assignment the way fireTaskTimeout does: a slow GPS fix looks
+// identical to a driver who genuinely never left, and forcibly freeing the
+// driver on that guess could strand someone who IS actually en route. This
+// is a nudge for the valet to check, not an automatic reassignment.
+async function fireMovementTimeout(taskId, driverId) {
+  const task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
+  // Already moving (or moved on/finished) by the time this fired — nothing
+  // to say. Also bails if this driver isn't even on the job anymore (a
+  // recall, cancel, or reassignment already happened).
+  if (!task || task.driverId !== driverId) return;
+  const stillWaiting = task.driverStartLat == null
+    && ((task.type === 'park' && task.status === 'key_collected')
+      || (task.type === 'retrieve' && task.status === 'assigned'));
+  if (!stillWaiting) return;
+
+  const driverName = task.driver?.user?.name ?? 'The driver';
+  const owner = task.valetId ?? task.arrivalOwnerValetId ?? task.retrievalOwnerValetId;
+  await notificationService.push({
+    ...(owner ? { targetRole: `valet:${owner}`, targetUserId: owner } : { targetRole: 'valet' }),
+    title: '⏱️ Driver has not started moving',
+    body: `${driverName} was assigned ${task.carNumber} but hasn't started yet — check on them or reassign.`,
+    type: 'alarm',
+  }).catch(() => {});
 }
 
 module.exports = {

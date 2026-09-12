@@ -69,6 +69,13 @@ function emitTargeted(targetRole, targetUserId, payload) {
   const [kind, scopedId] = targetRole.split(':');
   if (scopedId) {
     if (kind === 'driver') realtime.emitToDriver(scopedId, 'notification:new', payload);
+    // 'valetStation:<gate|lot>' addresses every valet currently on that
+    // physical station (see realtime/index.js's 'role:valetStation:<x>'
+    // room) — a room broadcast, not a single user, so this must come
+    // before the generic scopedId-as-userId branch below or 'gate'/'lot'
+    // would be parsed as a user id and the emit would silently reach
+    // nobody.
+    else if (kind === 'valetStation') realtime.emitToRoles([`valetStation:${scopedId}`], 'notification:new', payload);
     // '<role>:<userId>' style tags carry a user id; skip if already sent via
     // targetUserId above. Compared as strings on purpose: scopedId comes out
     // of a split() so it's always a string, while targetUserId is a number —
@@ -92,6 +99,10 @@ async function listForUser(user) {
   const roleTags = [user.role, 'all'];
   if (user.driver) roleTags.push(`driver:${user.driver.id}`);
   if (user.role === 'valet') roleTags.push(`valet:${user.id}`);
+  // A valet who reconnects (or never had the live socket event) can still
+  // recover a station-addressed alert through this REST fallback, same
+  // reasoning as the 'valet:<id>' tag above.
+  if (user.role === 'valet' && user.valetStation) roleTags.push(`valetStation:${user.valetStation}`);
 
   return prisma.notification.findMany({
     where: {

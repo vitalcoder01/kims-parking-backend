@@ -1,0 +1,19 @@
+-- Which physical station a valet works: 'gate' (front gate, where cars
+-- arrive and keys are collected) or 'lot' (the parking end, where cars are
+-- actually parked/retrieved from). Only meaningful for role = 'valet'; null
+-- for every other role, and for an existing valet account until an admin
+-- assigns one — see the two-station handoff model (task.service.js's
+-- gateHandoff/confirmParkedByValet/requestOtherStationDriver, and the
+-- valetStation-routed notification targeting in notification.service.js/
+-- push.service.js/realtime/index.js).
+--
+-- Purely additive: one nullable column, nothing altered or dropped. Existing
+-- rows stay NULL, which is correct — no valet has ever had a station, and
+-- an admin assigns one explicitly per account (PATCH /admin/users/:id).
+--
+-- Hand-written, same reason as 20260827120000_task_delivered_at: this
+-- project's `prisma migrate dev` shadow-database replay fails on the
+-- pre-existing 20260729080000_drop_visitor_purpose migration (a bare DROP
+-- COLUMN with no IF EXISTS guard). `migrate deploy` needs no shadow
+-- database, so it isn't affected.
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "valetStation" TEXT;

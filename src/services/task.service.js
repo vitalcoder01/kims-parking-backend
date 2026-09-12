@@ -384,20 +384,41 @@ function ownerLabel(task, fallback = 'Someone') {
   return String(name ?? '').trim() || fallback;
 }
 
-function notifyRetrievalOwner(task) {
-  const owner = task.arrivalOwnerValetId;
+async function notifyRetrievalOwner(task) {
   const who = ownerLabel(task, 'A guest');
   const body = `${who} is leaving and needs ${task.carNumber}. Please assign a driver.`;
+  // A personal owner only holds a *private* retrieval window when they can
+  // actually act on it — a gate-station valet's job ends at handing a key to
+  // a driver; they never stand next to the parked car to assign its
+  // retrieval driver. So a gate-owned session is treated exactly like an
+  // unowned one and routed to the lot station, instead of ringing the gate
+  // valet with a job they cannot do (see the two-station handoff model).
+  const ownerId = task.arrivalOwnerValetId;
+  const ownerRecord = ownerId
+    ? await prisma.user.findUnique({ where: { id: ownerId }, select: { valetStation: true } })
+    : null;
+  const personalOwner = ownerId && ownerRecord?.valetStation !== 'gate' ? ownerId : null;
   // `valet:<id>` addresses one person; the bare role name would broadcast to
-  // everyone and defeat the entire point of ownership. With no owner (a car
-  // parked before ownership existed, or an owner whose account is gone) it
-  // goes to the floor — correct, not a fallback: an unowned car still has to
-  // be retrieved.
-  // alarmLevel 'long': a doctor or staff member has asked for their car and
-  // is standing there waiting. This is what the 20-second ring exists for;
-  // everything else a valet receives is a reminder and rings briefly.
-  return notificationService.push(owner
-    ? { targetRole: `valet:${owner}`, targetUserId: owner, title: '🚗 Car requested — your session', body, type: 'alarm', alarmLevel: 'long' }
+  // everyone and defeat the entire point of ownership. alarmLevel 'long': a
+  // doctor or staff member has asked for their car and is standing there
+  // waiting. This is what the 20-second ring exists for; everything else a
+  // valet receives is a reminder and rings briefly.
+  if (personalOwner) {
+    return notificationService.push({
+      targetRole: `valet:${personalOwner}`, targetUserId: personalOwner,
+      title: '🚗 Car requested — your session', body, type: 'alarm', alarmLevel: 'long',
+    });
+  }
+  // No personal owner who can act (a gate-station owner, a car parked before
+  // ownership existed, or a visitor whose check-in valet's account is gone)
+  // — route to the lot station first: that's where the parked cars and the
+  // drivers who can reach them actually are (see the two-station handoff
+  // model). Falls back to broadcasting every valet on a site with no
+  // stations configured at all, so this never silently drops a request
+  // during rollout.
+  const hasLotStation = await prisma.user.findFirst({ where: { role: 'valet', valetStation: 'lot' }, select: { id: true } });
+  return notificationService.push(hasLotStation
+    ? { targetRole: 'valetStation:lot', title: '🚗 Car requested', body, type: 'alarm', alarmLevel: 'long' }
     : { targetRole: 'valet', title: '🚗 Car requested', body, type: 'alarm', alarmLevel: 'long' });
 }
 
@@ -575,6 +596,21 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
           throw ApiError.conflict('That driver has already accepted this job — cancel it first to reassign', 'JOB_GONE');
         }
 
+        // A gate-station arrival owner never personally holds a retrieval
+        // session's claim either: they hand keys to drivers, they don't stand
+        // next to a parked car to assign one. requestRetrieval carries the
+        // arrival owner forward onto valetId purely as continuity metadata —
+        // until someone actually acts on the retrieval, that inherited value
+        // must not be mistaken for a real claim by the gate valet. Resolved
+        // once, up front, and reused by every guard below plus the ownership
+        // claim they protect.
+        const arrivalOwnerStation = valetId && existing.type === 'retrieve' && existing.arrivalOwnerValetId != null
+          ? (await tx.user.findUnique({ where: { id: existing.arrivalOwnerValetId }, select: { valetStation: true } }))?.valetStation
+          : null;
+        const arrivalOwnerIsGate = arrivalOwnerStation === 'gate';
+        const isInheritedGateClaim = existing.type === 'retrieve' && arrivalOwnerIsGate
+          && existing.valetId === existing.arrivalOwnerValetId;
+
         // One job, one valet. Without this, two valets who both received the
         // same alert could each assign a driver: the second call is a
         // perfectly ordinary "reassign" as far as every other check is
@@ -584,8 +620,11 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
         // The claim is deliberately NOT permanent — it lifts once the job has
         // escalated (escalatedAt set), which is the point at which the owner
         // has had their window and the team is meant to pick it up. So a valet
-        // who logs off mid-job can't freeze a real car indefinitely.
-        if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt) {
+        // who logs off mid-job can't freeze a real car indefinitely. It also
+        // lifts for a retrieval whose only "claim" is the gate valet's
+        // inherited metadata (isInheritedGateClaim) — that valet was never a
+        // real claimant, so this must not block the lot valet who actually is.
+        if (valetId && existing.valetId && existing.valetId !== valetId && !existing.escalatedAt && !isInheritedGateClaim) {
           const owner = await tx.user.findUnique({ where: { id: existing.valetId }, select: { name: true } });
           throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
         }
@@ -611,11 +650,13 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
             throw ApiError.conflict(`${owner?.name ?? 'Another valet'} has accepted this retrieval`, 'JOB_GONE');
           }
           // Still inside the session owner's private window — nobody else has
-          // even been shown this yet.
+          // even been shown this yet. Skipped for a gate-station owner: see
+          // arrivalOwnerIsGate above.
           if (retrievalOwner == null
               && existing.arrivalOwnerValetId != null
               && existing.arrivalOwnerValetId !== valetId
-              && !existing.recoveryBroadcastAt) {
+              && !existing.recoveryBroadcastAt
+              && !arrivalOwnerIsGate) {
             const owner = await tx.user.findUnique({ where: { id: existing.arrivalOwnerValetId }, select: { name: true } });
             throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
           }
@@ -640,7 +681,7 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
           ? {
               retrievalOwnerValetId: valetId,
               retrievalAcceptedAt: new Date(),
-              retrievalOwnershipSource: existing.arrivalOwnerValetId === valetId ? 'OWNER' : 'RECOVERY',
+              retrievalOwnershipSource: existing.arrivalOwnerValetId === valetId || arrivalOwnerIsGate ? 'OWNER' : 'RECOVERY',
             }
           : {};
 
@@ -718,12 +759,20 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
       // valet whose phone died (or lost signal) in that gap left a real
       // assignment sitting there that the driver was never told about.
       notifyDriverAssigned(task).catch(() => {});
-      // Countdown for the driver to accept — on expiry the valet is prompted
-      // to reassign (see acceptWatchdog.js). Any countdown still running for
-      // the driver just bumped off this task is superseded by this same call
-      // (arm() disarms whatever timer already existed for this task id).
-      await watchdog.arm('task', taskId, driverId);
-      return task;
+      // Drivers no longer accept or reject an assignment at all — every
+      // caller of assignDriver (park, staff/doctor retrieve, and visitor
+      // pickups/retrievals via visitor.service.js, which all delegate here)
+      // now gets the driver accepted on their behalf, the instant a valet
+      // assigns them. There is nothing left for the old accept-timeout to
+      // time out, so arm the movement watchdog in its place: it only fires
+      // if the driver's GPS never actually starts (see updateLocation's
+      // auto-advance into in_transit, and acceptWatchdog's
+      // fireMovementTimeout) and unlike the accept-timeout it never forces
+      // the driver off the job — a slow GPS fix looks identical to one that
+      // never came, so this only alerts, it doesn't roll anything back.
+      const accepted = await acceptTask(taskId, driverId);
+      await watchdog.arm('movement', taskId, driverId);
+      return accepted;
     },
   );
 }
@@ -883,19 +932,31 @@ async function markInTransit(taskId, driverId) {
   });
   cache.invalidate('tasks:');
   watchdog.disarm('task', taskId);
+  // The driver has genuinely started — the movement watchdog's only
+  // question (did they ever start moving?) is answered, whether this
+  // transition came from updateLocation's own auto-advance or a manual
+  // call.
+  watchdog.disarm('movement', taskId);
   emitTask(updated);
   await syncVisitorFromTask(updated).catch(() => {});
   return updated;
 }
 
-// Driver: "Mark Parked" — occupies the slot, frees the driver, completes the task.
-async function markParked(taskId, slotId, driverId) {
+// Shared core of "car has been physically parked" — occupies the slot,
+// frees the driver, completes the task. Used by both markParked (the
+// driver's own legacy action) and confirmParkedByValet (the lot-station
+// valet confirming it instead, see the two-station handoff model) so the
+// two never drift into subtly different slot-claiming logic. `driverId`
+// is only given by the driver-facing caller, and only THAT caller's
+// identity is checked against the task (assertOwnDriver) — a valet
+// confirming isn't claiming to BE the driver, just reporting what happened.
+async function _completePark(taskId, slotId, driverId) {
   // Deliberately NOT Serializable. This runs while the task is
   // key_collected/in_transit — exactly when the driver's phone is writing a
   // GPS ping to this same row every few seconds. Under Serializable that
-  // read-write dependency aborts the transaction, and the driver standing
-  // at the slot gets "please try again" for a conflict that has nothing to
-  // do with what they're doing.
+  // read-write dependency aborts the transaction, and whoever is confirming
+  // parked gets "please try again" for a conflict that has nothing to do
+  // with what they're doing.
   //
   // The race that genuinely needs protecting is two drivers claiming the
   // same free slot, and a conditional write handles that atomically at Read
@@ -905,7 +966,7 @@ async function markParked(taskId, slotId, driverId) {
   const { task, slot, freedDriver } = await prisma.$transaction(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!task) throw ApiError.notFound('Task not found');
-    assertOwnDriver(task, driverId);
+    if (driverId != null) assertOwnDriver(task, driverId);
     if (task.type !== 'park') throw ApiError.conflict('Only park tasks can be marked parked');
     assertTransition(task, ['key_collected', 'in_transit'], 'mark parked');
     // The valet pulled this job back mid-drive — the car is supposed to be
@@ -946,12 +1007,12 @@ async function markParked(taskId, slotId, driverId) {
   if (freedDriver && task.driverId) emitDriverPatch(task.driverId, 'available', null);
   await syncVisitorFromTask(task).catch(() => {});
 
-  // Raised here rather than from the driver's app, which is where it used to
-  // live. Two reasons: the phone's copy of the task stores a missing doctorId
-  // as `undefined`, so a visitor's park produced a notification addressed to
-  // the literal string 'doctor:undefined' (258 such rows in production); and
-  // a driver whose phone dies right after tapping "Mark Parked" otherwise
-  // leaves the owner and the valet with no word that the car is down.
+  // Raised here rather than from whichever app confirms it. Two reasons: the
+  // phone's copy of the task stores a missing doctorId as `undefined`, so a
+  // visitor's park produced a notification addressed to the literal string
+  // 'doctor:undefined' (258 such rows in production); and whoever's phone
+  // dies right after confirming otherwise leaves the owner and the valet
+  // with no word that the car is down.
   const parkedBy = task.driver?.user?.name ?? 'the driver';
   if (task.doctorId != null) {
     notificationService.push({
@@ -977,17 +1038,44 @@ async function markParked(taskId, slotId, driverId) {
   return task;
 }
 
-// Driver: "Car Delivered to Valet Counter" — frees the slot, frees the driver.
-async function markRetrieved(taskId, driverId) {
-  // Read Committed, same reasoning as markParked: this runs mid-transit
+// Driver: "Mark Parked" — legacy entry point, kept for any task not running
+// the two-station handoff model (a site with no valetStation assigned yet,
+// or admin override).
+async function markParked(taskId, slotId, driverId) {
+  return _completePark(taskId, slotId, driverId);
+}
+
+// Valet (lot station): confirms the car has been parked, in place of the
+// driver's own markParked — the whole point of the two-station handoff
+// model is that the driver's only job is to drive, not to report anything.
+// Requires a driver to actually be on the job (someone has to have driven
+// it), but doesn't check WHICH driver — that's the point, it's the valet
+// reporting, not the driver.
+async function confirmParkedByValet(taskId, slotId) {
+  const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
+  if (!task) throw ApiError.notFound('Task not found');
+  if (!task.driverId) throw ApiError.conflict('No driver is assigned to this job yet');
+  return _completePark(taskId, slotId, null);
+}
+
+// Shared core of "car has arrived back at the counter" — frees the slot,
+// frees the driver, notifies the doctor. Used by both markRetrieved (the
+// driver's own legacy action) and confirmArrivedByValet (the gate-station
+// valet confirming it instead, see the two-station handoff model), same
+// pairing as markParked/confirmParkedByValet above. `driverId` is only
+// given by the driver-facing caller, and only THAT caller's identity is
+// checked against the task — a valet confirming isn't claiming to BE the
+// driver, just reporting what happened.
+async function _completeRetrieve(taskId, driverId) {
+  // Read Committed, same reasoning as _completePark: this runs mid-transit
   // while GPS pings are hitting this row, and Serializable would abort on
   // that alone. Nothing here races for a scarce resource — it *frees* a
   // slot rather than claiming one — so the stronger isolation bought
-  // nothing and cost the driver a spurious error at the counter.
+  // nothing and cost whoever's confirming a spurious error at the counter.
   const { task, slot, freedDriver } = await prisma.$transaction(async (tx) => {
     const task = await tx.parkingTask.findUnique({ where: { id: taskId } });
     if (!task) throw ApiError.notFound('Task not found');
-    assertOwnDriver(task, driverId);
+    if (driverId != null) assertOwnDriver(task, driverId);
     if (task.type !== 'retrieve') throw ApiError.conflict('Only retrieve tasks can be marked retrieved');
     assertTransition(task, ['in_transit'], 'mark retrieved');
     let freedSlot = null;
@@ -1034,16 +1122,16 @@ async function markRetrieved(taskId, driverId) {
   // their Vehicle Status card in real time, and none of it asks anything of
   // them — so it stays silent. This is the only push they get.
   //
-  // Raised here rather than from the driver's app so a driver whose phone
-  // dies right after tapping "delivered" doesn't leave the doctor waiting
-  // upstairs with no idea the car has arrived. 'info', not 'alarm': it
-  // vibrates on the normal channel instead of ringing like a job alert.
-  // Staff only. A visitor is not a User, so a visitor's task has doctorId
-  // null — and this used to interpolate that straight into the target,
-  // producing the literal string 'doctor:null' and a notification addressed
-  // to nobody. 260 such rows accumulated in production, one per visitor
-  // retrieval, while the visitor themselves was never told anything. They are
-  // reached over WhatsApp and the public tracking page instead.
+  // Raised here rather than from whichever app confirms it, so a phone that
+  // dies right after doesn't leave the doctor waiting upstairs with no idea
+  // the car has arrived. 'info', not 'alarm': it vibrates on the normal
+  // channel instead of ringing like a job alert. Staff only. A visitor is
+  // not a User, so a visitor's task has doctorId null — and this used to
+  // interpolate that straight into the target, producing the literal string
+  // 'doctor:null' and a notification addressed to nobody. 260 such rows
+  // accumulated in production, one per visitor retrieval, while the visitor
+  // themselves was never told anything. They are reached over WhatsApp and
+  // the public tracking page instead.
   if (task.doctorId != null) {
     notificationService.push({
       targetRole: `doctor:${task.doctorId}`,
@@ -1055,6 +1143,24 @@ async function markRetrieved(taskId, driverId) {
   }
 
   return task;
+}
+
+// Driver: "Car Delivered to Valet Counter" — legacy entry point, kept for
+// any task not running the two-station handoff model.
+async function markRetrieved(taskId, driverId) {
+  return _completeRetrieve(taskId, driverId);
+}
+
+// Valet (gate station): confirms the car has arrived back at the front
+// gate, in place of the driver's own markRetrieved — the whole point of
+// the two-station handoff model is that the driver's only job is to drive.
+// Requires a driver to actually be on the job, but doesn't check WHICH
+// driver — that's the point, it's the valet reporting, not the driver.
+async function confirmArrivedByValet(taskId) {
+  const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
+  if (!task) throw ApiError.notFound('Task not found');
+  if (!task.driverId) throw ApiError.conflict('No driver is assigned to this job yet');
+  return _completeRetrieve(taskId, null);
 }
 
 // Valet: confirms the doctor/staff member actually came and took the car —
@@ -1113,9 +1219,21 @@ function metersBetween(lat1, lng1, lat2, lng2) {
 }
 
 async function updateLocation(taskId, lat, lng, driverId) {
-  const task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
+  let task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
   if (!task) throw ApiError.notFound('Task not found');
   assertOwnDriver(task, driverId);
+  // The driver's only job now is to accept GPS tracking and drive — there is
+  // no separate manual "start trip" tap left for them either (see
+  // assignDriver's auto-accept above). So the FIRST real location ping IS
+  // the start of the trip: auto-advance into in_transit here, reusing
+  // markInTransit's own tested transition (watchdog disarm, startedAt
+  // stamping, GPS start-anchor reset) instead of duplicating it. A task
+  // already in_transit takes this branch as a no-op every subsequent ping.
+  const canAutoStart = task.status === 'key_collected'
+    || (task.type === 'retrieve' && task.status === 'assigned');
+  if (canAutoStart) {
+    task = await markInTransit(taskId, driverId);
+  }
   assertTransition(task, ['key_collected', 'in_transit'], 'report location');
 
   const isFirstPing = task.driverStartLat == null || task.driverStartLng == null;
@@ -1434,6 +1552,91 @@ async function markReturned(taskId, driverId) {
   return task;
 }
 
+// Valet: "no driver available on my station — ask the other side to
+// assign one." Explicitly hands the job's ownership across (clears
+// valetId for a park job, retrievalOwnerValetId for a retrieval) rather
+// than just showing it on both screens — the same "who's on the hook if
+// this stalls" question every other ownership field in this file already
+// answers stays answered here too. The other station then picks it up
+// exactly the way any unowned job already is, through assignDriver's own
+// claim logic — nothing new needed there.
+async function requestOtherStationDriver(taskId, valetId) {
+  const valet = await prisma.user.findUnique({ where: { id: valetId }, select: { valetStation: true } });
+  if (!valet?.valetStation) throw ApiError.badRequest('Your account has no station assigned');
+  const toStation = valet.valetStation === 'gate' ? 'lot' : 'gate';
+
+  const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
+  if (!task) throw ApiError.notFound('Task not found');
+
+  let result;
+  if (task.type === 'retrieve') {
+    // Eligible to hand this off if you already dynamically claimed the
+    // retrieval (retrievalOwnerValetId === you — e.g. you tried a driver who
+    // later fell through), OR nobody has claimed it yet and it currently
+    // sits with you: either personally, as the arrival owner (mirrors the
+    // private window notifyRetrievalOwner gives a non-gate owner), or
+    // generally, because it was broadcast to your whole station (mirrors
+    // notifyRetrievalOwner routing a gate-owned or unowned session to the
+    // lot station). Fresh, never-touched requests are the common case this
+    // button exists for, so this must recognize them, not just a claim that
+    // assigning a driver would have already resolved.
+    let eligible = task.retrievalOwnerValetId === valetId;
+    if (!eligible && task.retrievalOwnerValetId == null) {
+      if (task.arrivalOwnerValetId === valetId) {
+        eligible = true;
+      } else if (valet.valetStation === 'lot') {
+        const arrivalOwnerStation = task.arrivalOwnerValetId
+          ? (await prisma.user.findUnique({ where: { id: task.arrivalOwnerValetId }, select: { valetStation: true } }))?.valetStation
+          : null;
+        eligible = arrivalOwnerStation == null || arrivalOwnerStation === 'gate';
+      }
+    }
+    result = eligible
+      ? await prisma.parkingTask.updateMany({
+          where: {
+            id: taskId, type: 'retrieve', status: { in: ['requested', 'accepted'] }, driverId: null,
+            retrievalOwnerValetId: task.retrievalOwnerValetId,
+          },
+          data: { retrievalOwnerValetId: null, retrievalOwnershipSource: null, status: 'accepted' },
+        })
+      : { count: 0 };
+  } else {
+    result = await prisma.parkingTask.updateMany({
+      where: { id: taskId, type: 'park', valetId, status: 'assigned', driverId: null },
+      data: { valetId: null, valetClaimedAt: null },
+    });
+  }
+  if (result.count === 0) throw ApiError.conflict('This job is not currently yours to hand off, or it already has a driver', 'JOB_GONE');
+
+  const updated = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
+  cache.invalidate('tasks:');
+  emitTask(updated);
+
+  const who = ownerLabel(updated, 'A guest');
+  await notificationService.push({
+    targetRole: `valetStation:${toStation}`,
+    title: '🚗 No driver available — please assign one',
+    body: `${who} needs ${updated.carNumber}. No driver was available on the other side.`,
+    type: 'alarm',
+    alarmLevel: 'long',
+  }).catch(() => {});
+
+  return updated;
+}
+
+// Gate valet: the single action that replaces "assign driver -> driver
+// accepts -> valet hands over key" with one tap for a NEW park job. The
+// driver no longer accepts/rejects at all (assignDriver now accepts on
+// their behalf — see its tail above), so this just chains the two
+// EXISTING, already-tested transitions (create, then assign) followed by
+// the valet's own key-handover step, all as one action instead of three
+// separate human-driven steps.
+async function gateHandoff({ doctorId, carNumber, slotId, driverId, valetId }) {
+  const { task } = await createTask({ type: 'park', doctorId, carNumber, slotId, valetId });
+  await assignDriver(task.id, driverId, null, valetId);
+  return markKeyCollected(task.id);
+}
+
 module.exports = {
   syncVisitorFromTask,
   ownerLabel,
@@ -1462,4 +1665,8 @@ module.exports = {
   recallTask,
   markReturned,
   updateLocation,
+  confirmParkedByValet,
+  confirmArrivedByValet,
+  requestOtherStationDriver,
+  gateHandoff,
 };

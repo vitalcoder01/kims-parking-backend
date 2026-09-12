@@ -73,6 +73,12 @@ async function resolveTargetUserIds(targetRole, targetUserId) {
     if (kind === 'driver') {
       const driver = await prisma.driver.findUnique({ where: { id: parseId(scopedId) } });
       if (driver) ids.add(driver.userId);
+    } else if (kind === 'valetStation') {
+      // 'valetStation:<gate|lot>' — every valet currently on that
+      // physical station, not a single user id (see notification.service
+      // .js's emitTargeted for the matching socket-room branch).
+      const valets = await prisma.user.findMany({ where: { role: 'valet', valetStation: scopedId }, select: { id: true } });
+      valets.forEach(v => ids.add(v.id));
     } else {
       ids.add(parseId(scopedId)); // 'doctor:<userId>' style — the id is a user id
     }

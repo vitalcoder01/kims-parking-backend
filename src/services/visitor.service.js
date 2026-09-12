@@ -428,13 +428,18 @@ async function assignDriver(visitorId, driverId, valetId) {
     ?? await createParkTaskForVisitor(visitor, valetId ?? visitor.valetId);
   if (!task) throw ApiError.conflict('Could not raise a parking job for this visitor', 'JOB_GONE');
 
+  // Drivers no longer accept/reject at all — taskService().assignDriver now
+  // accepts on the driver's behalf the instant it assigns them (see its own
+  // tail for why). Mirrored below with acceptedAt stamped immediately too,
+  // instead of null, so this row doesn't sit there implying an acceptance
+  // that's already happened is still pending.
   await taskService().assignDriver(task.id, driverId, null, valetId);
 
   // The task is the source of truth; this keeps the visitor row readable for
   // the tracking page and the valet's visitor list.
   const updated = await prisma.visitor.update({
     where: { id: visitorId },
-    data: { driverId, driverAssignedAt: new Date(), acceptedAt: null, pickedUpAt: null, trackingProgress: 0.25 },
+    data: { driverId, driverAssignedAt: new Date(), acceptedAt: new Date(), pickedUpAt: null, trackingProgress: 0.25 },
     include: visitorInclude,
   });
   cache.invalidate('visitors:');

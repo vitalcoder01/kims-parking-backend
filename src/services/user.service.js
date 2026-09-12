@@ -87,7 +87,7 @@ async function listUsers() {
 // also get their linked Driver row created in the same transaction, exactly
 // like the seed script does, so a new driver login is immediately assignable
 // to tasks without a separate manual step.
-async function createUser({ employeeId, name, role, password, department, cardCode, phone, carNumber }) {
+async function createUser({ employeeId, name, role, password, department, cardCode, phone, carNumber, valetStation }) {
   const id = employeeId.trim().toUpperCase();
 
   const existing = await prisma.user.findUnique({ where: { employeeId: id } });
@@ -110,6 +110,7 @@ async function createUser({ employeeId, name, role, password, department, cardCo
         name: name.trim(),
         role,
         department: department?.trim() || null,
+        valetStation: normalizeValetStation(valetStation) ?? null,
         cardCode: cardCode || null,
         phone: phone?.trim() || null,
         carNumber: carNumber?.trim().toUpperCase() || null,
@@ -130,7 +131,20 @@ async function createUser({ employeeId, name, role, password, department, cardCo
 // a driver role makes them assignable to tasks right away, and moving a
 // driver to another role cleanly drops their driver profile instead of
 // leaving an orphaned one behind.
-async function updateUser(id, { name, role, department, cardCode, phone, carNumber }) {
+// Only meaningful for role 'valet' — see the two-station handoff model
+// (task.service.js gateHandoff/confirmParkedByValet/station-routed
+// retrieval alerts). Accepts null to un-assign a station (back to the
+// original "any valet can pick up anything" behavior for that account).
+function normalizeValetStation(valetStation) {
+  if (valetStation === undefined) return undefined;
+  if (valetStation === null || valetStation === '') return null;
+  if (valetStation !== 'gate' && valetStation !== 'lot') {
+    throw ApiError.badRequest("valetStation must be 'gate', 'lot', or null");
+  }
+  return valetStation;
+}
+
+async function updateUser(id, { name, role, department, cardCode, phone, carNumber, valetStation }) {
   const existing = await prisma.user.findUnique({ where: { id }, include: { driver: true } });
   if (!existing) throw ApiError.notFound('User not found');
 
@@ -156,6 +170,7 @@ async function updateUser(id, { name, role, department, cardCode, phone, carNumb
         ...(cardCode !== undefined && { cardCode: cardCode || null }),
         ...(phone !== undefined && { phone: phone?.trim() || null }),
         ...(carNumber !== undefined && { carNumber: carNumber?.trim().toUpperCase() || null }),
+        ...(valetStation !== undefined && { valetStation: normalizeValetStation(valetStation) }),
       },
     });
 

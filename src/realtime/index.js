@@ -37,7 +37,7 @@ function initRealtime(server) {
       const payload = verifyToken(token);
       const user = await prisma.user.findUnique({ where: { id: payload.sub }, include: { driver: true } });
       if (!user) return next(new Error('user no longer exists'));
-      socket.data.user = { id: user.id, role: user.role, name: user.name, driverId: user.driver?.id ?? null };
+      socket.data.user = { id: user.id, role: user.role, name: user.name, driverId: user.driver?.id ?? null, valetStation: user.valetStation ?? null };
       next();
     } catch {
       next(new Error('invalid token'));
@@ -45,9 +45,18 @@ function initRealtime(server) {
   });
 
   io.on('connection', (socket) => {
-    const { id, role, name, driverId } = socket.data.user;
+    const { id, role, name, driverId, valetStation } = socket.data.user;
     socket.join(`role:${role}`);
     socket.join(`user:${id}`);
+    // Two-station handoff model (see task.service.js gateHandoff /
+    // confirmParkedByValet): a valet assigned to a physical station also
+    // joins that station's room, so a retrieval alert or a 'no drivers on
+    // my side' handback can reach exactly the gate valets or exactly the
+    // lot valets instead of every valet on shift. Reuses the existing
+    // 'role:<name>' room convention (emitToRoles/notification targetRole
+    // both already know how to address 'role:<anything>') rather than
+    // adding a second addressing scheme.
+    if (role === 'valet' && valetStation) socket.join(`role:valetStation:${valetStation}`);
     if (driverId) {
       socket.join(`driver:${driverId}`);
       const count = (driverSockets.get(driverId) ?? 0) + 1;
