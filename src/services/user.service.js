@@ -196,6 +196,12 @@ async function updateUser(id, { name, role, department, cardCode, phone, carNumb
 
     const updated = await tx.user.findUnique({ where: { id }, include: { driver: true } });
     invalidateUserCache(id);
+    // A valet already connected when their station is (re)assigned would
+    // otherwise keep whatever room membership their socket picked up at
+    // handshake time until they fully reconnect — see
+    // refreshValetStationRooms's own comment for the real report this
+    // came from (a freshly-assigned lot valet, same tab, hearing nothing).
+    if (valetStation !== undefined) realtime.refreshValetStationRooms(id, updated.valetStation);
     return updated;
   });
 }

@@ -15,7 +15,7 @@ const list = asyncHandler(async (req, res) => {
   // to the floor. Enforced server-side so a stale client can't act on a job
   // it was never shown.
   const visible = req.user.role === 'valet'
-    ? tasks.filter((t) => taskService.isVisibleToValet(t, req.user.id))
+    ? await taskService.filterVisibleToValet(tasks, req.user.id)
     : tasks;
   res.json({ tasks: visible.map(serializeTask) });
 });

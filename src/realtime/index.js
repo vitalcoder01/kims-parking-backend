@@ -19,6 +19,30 @@ function onlineDriverIds() {
   return [...driverSockets.keys()];
 }
 
+// A connected valet's station is read once, at handshake time, and cached
+// on socket.data.user for that connection's whole life (see io.use below).
+// An admin reassigning them mid-session used to change nothing about an
+// already-open tab: the socket had already joined (or not) the
+// role:valetStation:<x> room based on the OLD value, and nothing ever
+// revisited that decision short of a full reconnect — so a freshly
+// assigned lot valet, still on the tab they were already using, silently
+// received none of the retrieval alerts routed to their new station.
+// Called from user.service.js's updateUser whenever valetStation actually
+// changes, right alongside the existing auth-cache invalidation, so a
+// station reassignment applies to a live session exactly like a role
+// change already did.
+function refreshValetStationRooms(userId, newStation) {
+  if (!io) return;
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.data.user?.id !== userId) continue;
+    const oldStation = socket.data.user.valetStation;
+    if (oldStation === newStation) continue;
+    if (oldStation) socket.leave(`role:valetStation:${oldStation}`);
+    if (newStation) socket.join(`role:valetStation:${newStation}`);
+    socket.data.user.valetStation = newStation;
+  }
+}
+
 function initRealtime(server) {
   io = new Server(server, {
     path: '/socket.io',
@@ -128,4 +152,5 @@ module.exports = {
   emitToUser,
   emitToDriver,
   onlineDriverIds,
+  refreshValetStationRooms,
 };
