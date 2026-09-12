@@ -57,6 +57,5 @@ router.patch('/:id/silence-driver-reminder', requireRole('valet', 'admin'), ctrl
 router.patch('/:id/recall', requireRole('valet', 'admin'), ctrl.recall);
 // Driver confirms they've brought a recalled car back to the counter.
 router.patch('/:id/returned', requireRole('driver', 'admin'), ctrl.markReturned);
-router.patch('/:id/location', requireRole('driver', 'admin'), ctrl.updateLocation);
 
 module.exports = router;
