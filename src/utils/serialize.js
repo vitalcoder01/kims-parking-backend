@@ -44,9 +44,17 @@ function serializeTask(task) {
     // so a recovery hand-off doesn't erase that history.
     arrivalOwnerValetId: task.arrivalOwnerValetId ?? undefined,
     arrivalOwnerValetName: task.arrivalOwnerValet?.name,
+    // Two-station handoff model: lets a client tell a gate-station owner
+    // (who never personally holds retrieval visibility/action — see
+    // task.service.js's isVisibleToValet/emitTask/notifyRetrievalOwner)
+    // apart from a lot-station or single-pool one, without a second round
+    // trip — denormalized here the same way arrivalOwnerValetName already
+    // is, off the same included relation.
+    arrivalOwnerValetStation: task.arrivalOwnerValet?.valetStation ?? undefined,
     arrivalAcceptedAt: task.arrivalAcceptedAt ?? undefined,
     retrievalOwnerValetId: task.retrievalOwnerValetId ?? undefined,
     retrievalOwnerValetName: task.retrievalOwnerValet?.name,
+    retrievalOwnerValetStation: task.retrievalOwnerValet?.valetStation ?? undefined,
     retrievalAcceptedAt: task.retrievalAcceptedAt ?? undefined,
     retrievalOwnershipSource: task.retrievalOwnershipSource ?? undefined,
     ownerNotifiedAt: task.ownerNotifiedAt ?? undefined,
