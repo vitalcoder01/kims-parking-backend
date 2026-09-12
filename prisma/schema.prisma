@@ -11,6 +11,17 @@ datasource db {
 model User {
   employeeId          String         @unique
   password            String
+  // Which physical station this valet works -- 'gate' (front gate, where
+  // cars arrive and keys are collected) or 'lot' (the parking end, where
+  // cars are actually parked/retrieved from). Only meaningful for
+  // role == 'valet'; null for every other role, and for an existing valet
+  // account until an admin assigns one (see the two-station handoff model --
+  // task.service.js gateHandoff/confirmParkedByValet/station-routed
+  // retrieval alerts). Nullable and additive on purpose: an unassigned
+  // valet keeps behaving exactly as before (eligible for anything, no
+  // station-scoped routing), so this rolls out without breaking any
+  // existing valet account.
+  valetStation        String?
   name                String
   role                Role
   department          String?

@@ -9,6 +9,10 @@ router.use(requireAuth);
 router.get('/', ctrl.list);
 router.get('/:id', ctrl.get);
 router.post('/', requireRole('valet', 'admin'), ctrl.create);
+// Gate-station valet: the two-station handoff model's single action for a
+// new park job (collect key, assign driver, hand over the key) — see
+// taskService.gateHandoff.
+router.post('/gate-handoff', requireRole('valet', 'admin'), ctrl.gateHandoff);
 router.post('/request-retrieval', requireRole('doctor', 'staff', 'admin'), ctrl.requestRetrieval);
 router.patch('/:id/assign', requireRole('valet', 'admin'), ctrl.assignDriver);
 // Valet: "Request retrieval" on behalf of a staff/doctor member (they called
@@ -24,7 +28,17 @@ router.patch('/:id/reject', requireRole('driver', 'admin'), ctrl.reject);
 router.patch('/:id/key-collected', requireRole('valet', 'admin'), ctrl.keyCollected);
 router.patch('/:id/in-transit', requireRole('driver', 'admin'), ctrl.inTransit);
 router.patch('/:id/park', requireRole('driver', 'admin'), ctrl.park);
+// Lot-station valet: confirms the car has been parked, in place of the
+// driver's own "park" action above — see taskService.confirmParkedByValet.
+router.patch('/:id/confirm-parked', requireRole('valet', 'admin'), ctrl.confirmParked);
 router.patch('/:id/retrieve', requireRole('driver', 'admin'), ctrl.retrieve);
+// Gate-station valet: confirms the car has arrived back at the front gate,
+// in place of the driver's own "retrieve" action above — see
+// taskService.confirmArrivedByValet.
+router.patch('/:id/confirm-arrived', requireRole('valet', 'admin'), ctrl.confirmArrived);
+// Valet: "no driver available on my station — ask the other side to
+// assign one." See taskService.requestOtherStationDriver.
+router.patch('/:id/request-other-station', requireRole('valet', 'admin'), ctrl.requestOtherStation);
 router.patch('/:id/confirm-delivered', requireRole('valet', 'admin'), ctrl.confirmDelivered);
 router.patch('/:id/cancel', requireRole('valet', 'admin'), ctrl.cancel);
 // Close a parked session whose car already left (frees the slot).

@@ -50,6 +50,24 @@ const create = asyncHandler(async (req, res) => {
   res.status(created ? 201 : 200).json({ task: serializeTask(task) });
 });
 
+// Gate-station valet: the two-station handoff model's single action for a
+// new park job — collects the key, assigns the driver, and hands the key
+// over, all in one tap (the driver is accepted automatically, see
+// taskService.assignDriver). Same attendance side-effects as create/keyCollected
+// above, since this replaces both of those for a site running this model.
+const gateHandoff = asyncHandler(async (req, res) => {
+  const { doctorId, carNumber, slotId, driverId } = req.body;
+  if (!doctorId || !carNumber || !driverId) {
+    throw ApiError.badRequest('doctorId, carNumber and driverId are required');
+  }
+  const task = await taskService.gateHandoff({
+    doctorId: parseId(doctorId), carNumber, slotId, driverId: parseId(driverId), valetId: req.user.id,
+  });
+  await attendanceService.incrementVehiclesHandled(req.user.id).catch(() => {});
+  await attendanceService.ensurePresent(parseId(doctorId)).catch(() => {});
+  res.status(201).json({ task: serializeTask(task) });
+});
+
 // Doctor/staff: request retrieval of their own parked car. The car's real
 // GPS destination is wherever they are standing right now (their own
 // phone) — that's who the driver is actually bringing it back to.
@@ -142,6 +160,29 @@ const retrieve = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(task) });
 });
 
+// Lot-station valet: confirms the car has been parked, in place of the
+// driver's own "park" action above — see taskService.confirmParkedByValet.
+const confirmParked = asyncHandler(async (req, res) => {
+  const { slotId } = req.body;
+  if (!slotId) throw ApiError.badRequest('slotId is required');
+  const task = await taskService.confirmParkedByValet(parseId(req.params.id), slotId);
+  res.json({ task: serializeTask(task) });
+});
+
+// Gate-station valet: confirms the car has arrived back at the front gate,
+// in place of the driver's own "retrieve" action above — see
+// taskService.confirmArrivedByValet.
+const confirmArrived = asyncHandler(async (req, res) => {
+  const task = await taskService.confirmArrivedByValet(parseId(req.params.id));
+  res.json({ task: serializeTask(task) });
+});
+
+// Valet: "no driver available on my station — ask the other side."
+const requestOtherStation = asyncHandler(async (req, res) => {
+  const task = await taskService.requestOtherStationDriver(parseId(req.params.id), req.user.id);
+  res.json({ task: serializeTask(task) });
+});
+
 // Valet: "Accept Retrieval". Available to the session owner inside their
 // window, and to any valet once the request has been released for recovery.
 // Which of those applies is decided in the service, atomically.
@@ -222,4 +263,4 @@ const updateLocation = asyncHandler(async (req, res) => {
   res.json({ task: serializeTask(updated) });
 });
 
-module.exports = { list, get, create, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, retrieve, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder, updateLocation };
+module.exports = { list, get, create, gateHandoff, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, confirmParked, requestOtherStation, retrieve, confirmArrived, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder, updateLocation };

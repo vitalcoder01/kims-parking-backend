@@ -19,7 +19,7 @@ const listUsers = asyncHandler(async (req, res) => {
 });
 
 const createUser = asyncHandler(async (req, res) => {
-  const { employeeId, name, role, password, department, cardCode, phone, carNumber } = req.body;
+  const { employeeId, name, role, password, department, cardCode, phone, carNumber, valetStation } = req.body;
   if (!employeeId || !name || !role || !password) {
     throw ApiError.badRequest('employeeId, name, role and password are required');
   }
@@ -29,15 +29,24 @@ const createUser = asyncHandler(async (req, res) => {
   if (password.length < 4) {
     throw ApiError.badRequest('password must be at least 4 characters');
   }
+  // Two-station handoff model: which physical station this valet works.
+  // Meaningless (and ignored) for any other role — userService.createUser
+  // is what actually enforces the 'gate'/'lot'/null constraint.
+  if (valetStation !== undefined && valetStation !== null && valetStation !== 'gate' && valetStation !== 'lot') {
+    throw ApiError.badRequest("valetStation must be 'gate', 'lot', or null");
+  }
 
-  const user = await userService.createUser({ employeeId, name, role, password, department, cardCode, phone, carNumber });
+  const user = await userService.createUser({ employeeId, name, role, password, department, cardCode, phone, carNumber, valetStation });
   res.status(201).json({ user: serializeUser(user) });
 });
 
 const updateUser = asyncHandler(async (req, res) => {
-  const { name, role, department, cardCode, phone, carNumber } = req.body;
+  const { name, role, department, cardCode, phone, carNumber, valetStation } = req.body;
   if (role !== undefined && !ROLES.includes(role)) {
     throw ApiError.badRequest(`role must be one of: ${ROLES.join(', ')}`);
+  }
+  if (valetStation !== undefined && valetStation !== null && valetStation !== 'gate' && valetStation !== 'lot') {
+    throw ApiError.badRequest("valetStation must be 'gate', 'lot', or null");
   }
   const id = parseId(req.params.id);
   // An admin demoting their own only-admin account would lock everyone out
@@ -46,7 +55,7 @@ const updateUser = asyncHandler(async (req, res) => {
     throw ApiError.conflict('You cannot change your own role away from admin');
   }
 
-  const user = await userService.updateUser(id, { name, role, department, cardCode, phone, carNumber });
+  const user = await userService.updateUser(id, { name, role, department, cardCode, phone, carNumber, valetStation });
   res.json({ user: serializeUser(user) });
 });
 
