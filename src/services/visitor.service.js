@@ -718,11 +718,30 @@ async function closeParkedVisitor(visitorId) {
 
     // Any still-live linked task goes with it, or the visitor closes while a
     // task keeps pointing at a session that no longer exists — the same
-    // orphaned-record class fixed elsewhere in this file.
-    await tx.parkingTask.updateMany({
+    // orphaned-record class fixed elsewhere in this file. Read before the
+    // cancel (not just updateMany blind) so any driver still genuinely
+    // holding one of these — e.g. an assigned retrieval, cut short by the
+    // valet closing the session instead of letting it finish — gets freed
+    // too, rather than staying 'busy' forever on a task nothing watches
+    // once it's terminal (see task.service.js's retireCurrentTask, fixed
+    // for the exact same reason after a real driver was found stuck this
+    // way for two weeks).
+    const stillLive = await tx.parkingTask.findMany({
       where: { visitorId, status: { notIn: ['completed', 'cancelled'] } },
-      data: { status: 'cancelled', completedAt: new Date(), isCurrent: false },
+      select: { id: true, driverId: true },
     });
+    if (stillLive.length) {
+      await tx.parkingTask.updateMany({
+        where: { id: { in: stillLive.map(t => t.id) } },
+        data: { status: 'cancelled', completedAt: new Date(), isCurrent: false },
+      });
+      for (const t of stillLive) {
+        // This file's freeDriverIfStillOn takes a VISITOR id (see its own
+        // comment above on why — a task id there once matched the wrong
+        // record entirely), not a task id like task.service.js's.
+        if (t.driverId) await freeDriverIfStillOn(tx, t.driverId, visitorId);
+      }
+    }
 
     const updated = await tx.visitor.update({
       where: { id: visitorId },
