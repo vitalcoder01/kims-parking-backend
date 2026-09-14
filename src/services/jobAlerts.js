@@ -288,6 +288,16 @@ async function claimRetrieval(taskId, valetId) {
   // job's generic "already accepted" dialog) even though assignDriver itself
   // would have accepted the assignment. The lead time still governs only the
   // automatic alert (see promoteScheduledRetrievals below).
+  //
+  // A gate-station arrival owner never personally holds a retrieval
+  // session's claim (see task.service.js's isVisibleToValet /
+  // notifyRetrievalOwner / assignDriver — same rule): they hand keys to
+  // drivers, they don't stand next to a parked car to assign one. Without
+  // this, a gate valet tapping the very request they'd just raised claimed
+  // it outright and skipped the lot valet entirely — the two-station
+  // handoff this whole claim exists to route through.
+  const caller = valetId ? await prisma.user.findUnique({ where: { id: valetId }, select: { valetStation: true } }) : null;
+  const callerIsGate = caller?.valetStation === 'gate';
   const claimed = await prisma.parkingTask.updateMany({
     where: {
       id: taskId,
@@ -300,7 +310,15 @@ async function claimRetrieval(taskId, valetId) {
       // already been escalated past.
       OR: [
         { retrievalOwnerValetId: null, recoveryBroadcastAt: { not: null } },
-        { retrievalOwnerValetId: null, arrivalOwnerValetId: valetId },
+        // Already punted to the other station via "No driver here"
+        // (taskService.requestOtherStationDriver) — the only path that
+        // leaves a retrieve task at status 'accepted' with no
+        // retrievalOwnerValetId; every other unclaimed state is
+        // 'requested'. Open to whoever it was punted to.
+        { retrievalOwnerValetId: null, status: 'accepted' },
+        // A non-gate arrival owner's own private window — skipped for a
+        // gate-station caller, who was never a real claimant here.
+        ...(callerIsGate ? [] : [{ retrievalOwnerValetId: null, arrivalOwnerValetId: valetId }]),
         { escalatedAt: { not: null } },
       ],
     },
@@ -325,6 +343,12 @@ async function claimRetrieval(taskId, valetId) {
   if (claimed.count === 0) {
     if (task.retrievalOwnerValetId && task.retrievalOwnerValetId !== valetId) {
       throw ApiError.conflict('This retrieval request has already been accepted.', 'ALREADY_ACCEPTED');
+    }
+    // The specific, common case the callerIsGate exclusion above produces:
+    // a clearer message than the generic "no longer available" fallback,
+    // which reads as though someone else already grabbed it.
+    if (callerIsGate && task.status === 'requested' && task.retrievalOwnerValetId == null) {
+      throw ApiError.conflict('Ask the lot valet to assign a driver — or tap "No driver here" if none are free', 'JOB_GONE');
     }
     if (task.retrievalOwnerValetId !== valetId) {
       throw ApiError.conflict('This retrieval request is no longer available.', 'JOB_GONE');

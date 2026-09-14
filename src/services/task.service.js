@@ -711,6 +711,28 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
             const owner = await tx.user.findUnique({ where: { id: existing.arrivalOwnerValetId }, select: { name: true } });
             throw ApiError.conflict(`${owner?.name ?? 'Another valet'} is handling this job`, 'JOB_GONE');
           }
+          // Two-station handoff: an unclaimed retrieval routed to the lot
+          // (arrival owner is gate-station) is the LOT valet's to assign —
+          // the guard just above deliberately doesn't block anyone here on
+          // arrivalOwnerIsGate, but that means it doesn't stop the GATE
+          // valet either. Normally claimRetrieval (jobAlerts.js) already
+          // refuses this before the client ever reaches this screen; this
+          // is the server-side backstop for the same rule, covering a
+          // direct call or a client that raced ahead of that rejection. It
+          // opens up once the lot side punts it back via "No driver here"
+          // (requestOtherStationDriver) — the only path that leaves a
+          // retrieve task at status 'accepted' with no retrievalOwnerValetId,
+          // every other unclaimed state is 'requested' — or once escalation/
+          // recovery has opened it to the whole team.
+          if (retrievalOwner == null && arrivalOwnerIsGate && existing.status !== 'accepted'
+              && !existing.escalatedAt && !existing.recoveryBroadcastAt) {
+            const callerStation = valetId
+              ? (await tx.user.findUnique({ where: { id: valetId }, select: { valetStation: true } }))?.valetStation
+              : null;
+            if (callerStation === 'gate') {
+              throw ApiError.conflict('Ask the lot valet to assign a driver — or tap "No driver here" if none are free', 'JOB_GONE');
+            }
+          }
         }
 
         const driver = await tx.driver.findUnique({ where: { id: driverId } });
