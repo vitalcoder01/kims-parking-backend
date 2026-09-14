@@ -83,6 +83,25 @@ const requestRetrieval = asyncHandler(async (req, res) => {
   res.status(201).json({ task: serializeTask(task) });
 });
 
+// Valet desk: staff/doctor called instead of using their own app and wants
+// their car — raises the request only, no driver. Routed through the SAME
+// taskService.requestRetrieval the doctor's own app and the visitor desk
+// flow (visitor.controller.js's requestVisitorRetrieval) both call, so
+// ownership, station routing, scheduling and notifications are the
+// existing ones, not a second implementation. Two-station handoff model:
+// this is what lets the request reach the lot valet the normal way instead
+// of the calling (gate) valet short-circuiting straight to assignDriver —
+// see assignRetrievalDriverForDoctor below, which still does exactly that
+// combined raise-and-assign for a valet with no station (or the lot
+// station, where assigning it themselves IS the normal flow).
+const requestRetrievalForDoctor = asyncHandler(async (req, res) => {
+  const task = await taskService.requestRetrieval({
+    doctorId: parseId(req.params.doctorId),
+    plannedDepartureMinutes: 0,
+  });
+  res.status(201).json({ task: serializeTask(task) });
+});
+
 const assignDriver = asyncHandler(async (req, res) => {
   const { driverId, lat, lng } = req.body;
   if (!driverId) throw ApiError.badRequest('driverId is required');
@@ -252,4 +271,4 @@ const cancelMyRetrieval = asyncHandler(async (req, res) => {
 });
 
 
-module.exports = { list, get, create, gateHandoff, requestRetrieval, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, confirmParked, requestOtherStation, retrieve, confirmArrived, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder };
+module.exports = { list, get, create, gateHandoff, requestRetrieval, requestRetrievalForDoctor, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, confirmParked, requestOtherStation, retrieve, confirmArrived, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder };

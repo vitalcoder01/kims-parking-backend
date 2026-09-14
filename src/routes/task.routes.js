@@ -16,8 +16,14 @@ router.post('/gate-handoff', requireRole('valet', 'admin'), ctrl.gateHandoff);
 router.post('/request-retrieval', requireRole('doctor', 'staff', 'admin'), ctrl.requestRetrieval);
 router.patch('/:id/assign', requireRole('valet', 'admin'), ctrl.assignDriver);
 // Valet: "Request retrieval" on behalf of a staff/doctor member (they called
-// the desk instead of using their own app) — raises the request and assigns
-// a driver in one step, the staff/doctor equivalent of visitors'
+// the desk instead of using their own app) — raises the request only, no
+// driver, the staff/doctor equivalent of visitors'
+// POST /visitors/:id/request-retrieval. Two-station handoff model: this is
+// what lets the request reach the lot valet the normal way.
+router.post('/doctor/:doctorId/request-retrieval', requireRole('valet', 'admin'), ctrl.requestRetrievalForDoctor);
+// Valet: raises AND assigns a driver in one step — kept for a valet with no
+// station (or the lot station, where assigning it themselves IS the normal
+// flow), the staff/doctor equivalent of visitors'
 // PATCH /visitors/:id/assign-retrieval.
 router.patch('/doctor/:doctorId/assign-retrieval', requireRole('valet', 'admin'), ctrl.assignRetrievalDriverForDoctor);
 // Valet gives up on a driver who hasn't accepted yet — right now, instead of
