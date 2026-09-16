@@ -2,7 +2,12 @@ const prisma = require('../config/database');
 const ApiError = require('../utils/ApiError');
 const cache = require('../utils/responseCache');
 const realtime = require('../realtime');
-const { serializeDriver } = require('../utils/serialize');
+const { serializeDriver, serializeSlot } = require('../utils/serialize');
+// task.service.js does NOT require this module, so requiring it here is
+// safe — used only for emitTask, so a forcibly-cancelled job disappears
+// live from whoever still has it on screen, the same way any other
+// cancellation does.
+const taskService = require('./task.service');
 
 const CACHE_TTL_MS = 2500;
 
@@ -92,4 +97,77 @@ async function setStatus(driverId, status) {
   return updated;
 }
 
-module.exports = { listDrivers, setStatus };
+// Admin escape hatch. setStatus above deliberately REFUSES to free a driver
+// who still has a live job — that guard is correct for the normal case
+// (someone fat-fingering a status change shouldn't orphan a real trip) but
+// it means a driver whose job got stuck on a state nothing can advance or
+// cancel through the normal flow (a past bug, a genuinely abandoned test
+// job, a driver who lost their phone mid-trip) has NO way back to available
+// through any of the app's own screens. This is that way back: cancels
+// whatever task(s) currently hold the driver — any status, not just the
+// early ones the ordinary cancelTask allows — frees the slot if one was
+// occupied, and frees the driver. Deliberately blunt and admin-only: it
+// bypasses the task state machine every other path is careful never to
+// bypass, so it is not something a valet gets to reach for mid-shift.
+async function forceFreeDriver(driverId) {
+  const driver = await prisma.driver.findUnique({ where: { id: driverId } });
+  if (!driver) throw ApiError.notFound('Driver not found');
+
+  const { cancelledTaskIds, freedSlot } = await prisma.$transaction(async (tx) => {
+    // The driver's own pointer is the obvious place to look, but sweep for
+    // any task still claiming this driver, not just currentTaskId — one
+    // live job per driver is enforced elsewhere, but this tool exists
+    // precisely because something already got past that once.
+    const stuckTasks = await tx.parkingTask.findMany({
+      where: { driverId, status: { in: ACTIVE_TASK_STATUSES } },
+    });
+
+    let freedSlot = null;
+    for (const task of stuckTasks) {
+      await tx.parkingTask.update({
+        where: { id: task.id },
+        data: { status: 'cancelled', completedAt: new Date(), isCurrent: false },
+      });
+      if (task.slotId) {
+        const slot = await tx.parkingSlot.findUnique({ where: { id: task.slotId } });
+        // Only free it if THIS task is still the one holding it — a slot
+        // that's moved on to a different task since must not be yanked
+        // out from under it.
+        if (slot && slot.taskId === task.id) {
+          freedSlot = await tx.parkingSlot.update({
+            where: { id: task.slotId },
+            data: { status: 'free', carNumber: null, doctorId: null, taskId: null },
+          });
+        }
+      }
+    }
+
+    await tx.driver.update({ where: { id: driverId }, data: { status: 'available', currentTaskId: null } });
+    return { cancelledTaskIds: stuckTasks.map(t => t.id), freedSlot };
+  });
+
+  cache.invalidate('drivers:');
+  if (cancelledTaskIds.length) cache.invalidate('tasks:');
+  if (freedSlot) cache.invalidate('slots:');
+
+  const updated = await prisma.driver.findUnique({ where: { id: driverId }, include: { user: true } });
+  realtime.emitAll('driver:patch', serializeDriver(updated));
+  if (freedSlot) realtime.emitAll('slot:patch', serializeSlot(freedSlot));
+  // Broadcast each cancelled task through the SAME ownership-aware path
+  // every other mutation uses, rather than a raw emit here that could show
+  // it to someone isVisibleToValet would have kept it from.
+  for (const taskId of cancelledTaskIds) {
+    const full = await taskService.getTask(taskId).catch(() => null);
+    if (!full) continue;
+    taskService.emitTask(full);
+    // A visitor's own ticket never mirrors a task mutation automatically
+    // (see task.service.js's cancelTask — this is the same omission that
+    // once left a cancelled check-in reading as a live 'pending' arrival
+    // forever). Same fix, same place it's needed.
+    if (full.visitorId) await taskService.syncVisitorFromTask(full).catch(() => {});
+  }
+
+  return updated;
+}
+
+module.exports = { listDrivers, setStatus, forceFreeDriver };

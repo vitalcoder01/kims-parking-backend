@@ -29,4 +29,11 @@ const setStatus = asyncHandler(async (req, res) => {
   res.json({ driver: serializeDriver(driver) });
 });
 
-module.exports = { list, setStatus };
+// Admin-only escape hatch — see driverService.forceFreeDriver for why this
+// exists separately from setStatus above.
+const forceFree = asyncHandler(async (req, res) => {
+  const driver = await driverService.forceFreeDriver(parseId(req.params.id));
+  res.json({ driver: serializeDriver(driver) });
+});
+
+module.exports = { list, setStatus, forceFree };
