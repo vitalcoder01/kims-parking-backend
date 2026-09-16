@@ -845,6 +845,25 @@ async function assignDriver(taskId, driverId, valetLocation, valetId) {
       // one who'd act on it anyway.
       const accepted = await acceptTask(taskId, driverId);
       await watchdog.arm('movement', taskId, driverId);
+
+      // Two-station handoff heads-up: a retrieve has been staffed — the
+      // driver is going to the slot, getting the car, and driving it back
+      // to the front gate. Nothing else audibly points the gate valet at
+      // "a car is on its way to you" until the car itself pulls up. The
+      // socket task:upsert already puts the card in front of them; this is
+      // the audible/tray complement that survives an unattended screen.
+      // Skipped for park (which has its own gate → lot heads-up on
+      // markKeyCollected, since park's driver-assign is often followed by
+      // the physical key handover within seconds, not a whole trip).
+      if (accepted.type === 'retrieve') {
+        notificationService.push({
+          targetRole: 'valetStation:gate',
+          title: '🚗 Car coming back to gate',
+          body: `${accepted.driver?.user?.name ?? 'A driver'} is bringing ${accepted.carNumber} back for ${ownerLabel(accepted, 'a guest')}.`,
+          type: 'info',
+        }).catch(() => {});
+      }
+
       return accepted;
     },
   );
@@ -972,6 +991,21 @@ async function markKeyCollected(taskId) {
   watchdog.disarm('task', taskId);
   emitTask(updated);
   await syncVisitorFromTask(updated).catch(() => {});
+
+  // Two-station handoff heads-up: the driver has physically taken the key
+  // and is on their way to the lot — nothing after this points the lot
+  // valet at "a car is about to arrive to be parked" until the car itself
+  // shows up. Ring the lot side so they can be ready with a slot, rather
+  // than only noticing when they happen to glance at the dashboard. The
+  // socket task:upsert already puts the card in front of them; this is the
+  // audible/tray complement that survives an unattended screen.
+  notificationService.push({
+    targetRole: 'valetStation:lot',
+    title: '🚗 Car incoming to park',
+    body: `${updated.driver?.user?.name ?? 'A driver'} has the key for ${updated.carNumber} — coming to the lot.`,
+    type: 'info',
+  }).catch(() => {});
+
   return updated;
 }
 
