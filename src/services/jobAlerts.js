@@ -298,6 +298,19 @@ async function claimRetrieval(taskId, valetId) {
   // handoff this whole claim exists to route through.
   const caller = valetId ? await prisma.user.findUnique({ where: { id: valetId }, select: { valetStation: true } }) : null;
   const callerIsGate = caller?.valetStation === 'gate';
+  // Whether THIS retrieval's arrival owner is a gate-station valet — read
+  // off the task once so the OR clause below can decide whether a
+  // non-gate caller may claim it even without being the arrival owner
+  // themselves (they wouldn't be — a gate valet is). Prisma has no
+  // straightforward way to express "OR where arrival owner's station is
+  // gate" in the updateMany itself, hence the pre-read. The task's
+  // arrival owner never changes over its life, so this pre-read is
+  // stable — no race with a concurrent write.
+  const existingForStation = await prisma.parkingTask.findUnique({
+    where: { id: taskId },
+    select: { arrivalOwnerValet: { select: { valetStation: true } } },
+  });
+  const arrivalOwnerIsGate = existingForStation?.arrivalOwnerValet?.valetStation === 'gate';
   const claimed = await prisma.parkingTask.updateMany({
     where: {
       id: taskId,
@@ -316,9 +329,21 @@ async function claimRetrieval(taskId, valetId) {
         // retrievalOwnerValetId; every other unclaimed state is
         // 'requested'. Open to whoever it was punted to.
         { retrievalOwnerValetId: null, status: 'accepted' },
-        // A non-gate arrival owner's own private window — skipped for a
-        // gate-station caller, who was never a real claimant here.
-        ...(callerIsGate ? [] : [{ retrievalOwnerValetId: null, arrivalOwnerValetId: valetId }]),
+        // A non-gate caller (lot or unassigned) may claim in two shapes:
+        // (a) they ARE the arrival owner — the private-window normal
+        //     case, e.g. a lot valet's own session;
+        // (b) the arrival owner is a gate-station valet — the gate never
+        //     personally holds this session's retrieval claim, so any
+        //     non-gate caller is who's meant to pick it up. Without (b)
+        //     a lot valet tapping "Assign driver" on a fresh gate-owned
+        //     request in Retrieval Requests got "This retrieval request
+        //     is no longer available." on every tap, since none of the
+        //     other OR clauses matched a still-unclaimed 'requested'
+        //     row with no arrival ownership by them personally.
+        ...(callerIsGate ? [] : [
+          { retrievalOwnerValetId: null, arrivalOwnerValetId: valetId },
+          ...(arrivalOwnerIsGate ? [{ retrievalOwnerValetId: null }] : []),
+        ]),
         { escalatedAt: { not: null } },
       ],
     },
