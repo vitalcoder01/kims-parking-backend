@@ -45,9 +45,27 @@ function emitTask(task) {
   }
   realtime.emitToRoles(['doctor', 'staff', 'driver', 'admin'], 'task:upsert', payload);
   realtime.emitToUser(owner, 'task:upsert', payload);
-  // Anyone who was shown this during a recovery broadcast and has now lost it
-  // needs it taken off their screen, not left as a dead card.
-  realtime.emitToRoles(['valet'], 'task:restrict', { id: task.id, ownerValetId: owner });
+  // Delivery leg: once a driver is dispatched, the gate station is the
+  // physical receiver and needs this on their screen (waitingNote + the
+  // "Car arrived at gate" button), regardless of who holds the retrieval
+  // claim. Matches isVisibleToValet's own callerStation bypass — the two
+  // must agree, or the socket shows a valet something the REST list then
+  // takes away on the next poll (or vice versa).
+  const driverDispatched = task.driverId != null;
+  if (driverDispatched) realtime.emitToRoles(['valetStation:gate'], 'task:upsert', payload);
+  // Anyone who was shown this during a recovery broadcast and has now lost
+  // it needs it taken off their screen, not left as a dead card. Once a
+  // driver's been dispatched, the ONLY valets who should keep it are the
+  // retrieval owner (already sent via emitToUser above) and the gate
+  // station (already sent via valetStation:gate just above). A plain
+  // 'valet'-role restrict here would then immediately yank the card off
+  // the gate valet's screen a millisecond after we put it there — so
+  // scope the restrict to the lot side only in that case. Before a driver
+  // is dispatched, gate valets never had this card in the first place, so
+  // the wider 'valet' restrict is still safe (and needed, for any lot
+  // valet who was shown it during a recovery broadcast).
+  const restrictTarget = driverDispatched ? 'valetStation:lot' : 'valet';
+  realtime.emitToRoles([restrictTarget], 'task:restrict', { id: task.id, ownerValetId: owner });
 }
 function emitDriverPatch(id, status, currentTaskId) {
   realtime.emitAll('driver:patch', { id, status, currentTaskId: currentTaskId ?? undefined });
@@ -83,7 +101,7 @@ function isRetrievalOpenToAll(task) {
   return task.recoveryBroadcastAt != null || task.escalatedAt != null;
 }
 
-function isVisibleToValet(task, valetId, valetStationById) {
+function isVisibleToValet(task, valetId, valetStationById, callerStation) {
   if (task.type !== 'retrieve') return true;
   const owner = task.retrievalOwnerValetId ?? task.arrivalOwnerValetId;
   if (owner == null) return true;               // never had an owner — open floor
@@ -99,6 +117,14 @@ function isVisibleToValet(task, valetId, valetStationById) {
   // retrieval within a second of the request while the lot valet's own
   // list never showed it at all.
   if (valetStationById?.get(owner) === 'gate') return true;
+  // Mirror of the gate-owner bypass, for the DELIVERY leg: once a driver
+  // is dispatched, the car is on its way back to the gate — the gate
+  // valet needs to see it so they can tap "Car arrived at gate" when it
+  // pulls up. Without this the retrieval, once claimed by the lot valet,
+  // was scoped socket-only to the lot valet themselves, and gate had an
+  // empty dashboard the whole time the car was heading to them
+  // (reported: "how the hell gate valet will know car came or not").
+  if (callerStation === 'gate' && task.driverId != null) return true;
   return isRetrievalOpenToAll(task);
 }
 
@@ -110,11 +136,16 @@ async function filterVisibleToValet(tasks, valetId) {
   const ownerIds = [...new Set(
     tasks.flatMap(t => [t.retrievalOwnerValetId, t.arrivalOwnerValetId]).filter(id => id != null),
   )];
-  const owners = ownerIds.length
-    ? await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, valetStation: true } })
+  // The caller's OWN station is one of the visibility inputs now (the
+  // delivery-leg gate bypass in isVisibleToValet reads it), so fetch it
+  // alongside the owners' stations in the same batched query.
+  const idsToFetch = [...new Set([...ownerIds, valetId].filter(id => id != null))];
+  const users = idsToFetch.length
+    ? await prisma.user.findMany({ where: { id: { in: idsToFetch } }, select: { id: true, valetStation: true } })
     : [];
-  const valetStationById = new Map(owners.map(o => [o.id, o.valetStation]));
-  return tasks.filter(t => isVisibleToValet(t, valetId, valetStationById));
+  const valetStationById = new Map(users.map(u => [u.id, u.valetStation]));
+  const callerStation = valetStationById.get(valetId) ?? null;
+  return tasks.filter(t => isVisibleToValet(t, valetId, valetStationById, callerStation));
 }
 
 /**
