@@ -7,8 +7,19 @@ const parseId = require('../utils/parseId');
 
 const list = asyncHandler(async (req, res) => {
   const { doctorId, driverId, status, type, history } = req.query;
+  // Doctor and staff only ever have a legitimate need for their OWN tasks.
+  // The list endpoint used to accept whatever ?doctorId=... the client sent
+  // and just trust it, so any doctor/staff account calling GET /tasks with
+  // no filter (or with someone else's id) got every task in the system —
+  // every plate, driver, arrival time and slot for every other doctor.
+  // Force the filter here rather than relying on the client to be polite.
+  // Fix (audit B2). Valets and admins keep the wider view they need for
+  // their dispatch roles.
+  const scopedDoctorId = (req.user.role === 'doctor' || req.user.role === 'staff')
+    ? req.user.id
+    : parseId(doctorId);
   const tasks = await taskService.listTasks({
-    doctorId: parseId(doctorId), driverId: parseId(driverId), status, type,
+    doctorId: scopedDoctorId, driverId: parseId(driverId), status, type,
     history: history === 'true',
   });
   // Valets only see retrievals they own, or ones that have been released back
@@ -22,6 +33,13 @@ const list = asyncHandler(async (req, res) => {
 
 const get = asyncHandler(async (req, res) => {
   const task = await taskService.getTask(parseId(req.params.id));
+  // Same reasoning as the list scoping above — a doctor/staff account
+  // fetching an arbitrary task by id had no ownership check either. Fix
+  // (audit B2). Only refuse cross-owner reads for doctor/staff; valets
+  // and admins have legitimate cross-task visibility.
+  if ((req.user.role === 'doctor' || req.user.role === 'staff') && task.doctorId !== req.user.id) {
+    throw ApiError.forbidden('This is not your car');
+  }
   res.json({ task: serializeTask(task) });
 });
 

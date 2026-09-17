@@ -6,7 +6,10 @@ const { requireRole } = require('../middleware/role.middleware');
 const router = express.Router();
 router.use(requireAuth);
 
-router.get('/', ctrl.list);
+// Valet-only — a visitor list includes plates, names and mobile numbers of
+// walk-in guests; the doctors/staff who log into the same portal have no
+// legitimate reason to see the walk-in registry. Fix (audit B3).
+router.get('/', requireRole('valet', 'admin'), ctrl.list);
 // Vehicle-number typeahead for the check-in form.
 router.get('/plate-suggest', requireRole('valet', 'admin'), ctrl.suggestPlates);
 // Valet desk lookup — token, mobile, plate or name.
@@ -21,7 +24,12 @@ router.patch('/:id/accept', requireRole('driver', 'admin'), ctrl.accept);
 router.patch('/:id/reject', requireRole('driver', 'admin'), ctrl.reject);
 router.patch('/:id/pickup', requireRole('driver', 'admin'), ctrl.pickup);
 router.patch('/:id/cancel', requireRole('valet', 'admin'), ctrl.cancel);
-router.patch('/:id/close-parked', ctrl.closeParked);
+// Destructive: frees the slot the visitor's car was in. Every other
+// visitor mutation on this router requires valet/admin — this one was
+// left without a guard, so any authenticated user could free a slot that
+// still had a real car in it and the next park job would be sent there.
+// Fix (audit B4).
+router.patch('/:id/close-parked', requireRole('valet', 'admin'), ctrl.closeParked);
 // Key's already with a driver — "bring my car back" instead of a cancel.
 router.patch('/:id/recall', requireRole('valet', 'admin'), ctrl.recall);
 router.patch('/:id/park', requireRole('driver', 'admin'), ctrl.park);
