@@ -59,6 +59,12 @@ const V1_9_18 = release(
   'Alarms now ring and vibrate for the full 20 seconds even when the app is closed, with a new alert tone. Reminders ring briefly instead, so the long alarm means someone is actually waiting. Adds an on-screen assistant that watches for problems, checks why alerts might not be reaching you, and reports faults automatically.',
 );
 
+const V1_9_19 = release(
+  53,
+  '1.9.19',
+  'Two-station valet handoff: the gate valet raises retrievals, the lot valet assigns the driver, and each side rings the other when a car is on its way. Drivers no longer use the app — the valet confirms parking and arrival straight from their own screen, no more waiting on a driver-side "in transit" tap. Live tracking is a clear status checklist now rather than an empty map, and admins can force-free a driver stuck on a dead job. Everything from v1.9.18 preserved (co-pilot, tiered alarms, error boundary, sync-race fixes).',
+);
+
 // ── Channels ─────────────────────────────────────────────────────────────
 /*
  * To ship to one role: add the release constant above, then point that
@@ -80,11 +86,11 @@ const V1_9_18 = release(
  * someone complains they never got an update.
  */
 const BY_ROLE = {
-  admin: V1_9_18,
-  valet: V1_9_18,
-  driver: V1_9_18,
-  doctor: V1_9_18,
-  staff: V1_9_18,
+  admin: V1_9_19,
+  valet: V1_9_19,
+  driver: V1_9_19,
+  doctor: V1_9_19,
+  staff: V1_9_19,
 };
 
 /*
@@ -96,7 +102,7 @@ const BY_ROLE = {
  * release the broadest set of users is on — it is what someone sees at the
  * login screen, before their own channel can apply.
  */
-const DEFAULT = V1_9_18;
+const DEFAULT = V1_9_19;
 
 /*
  * The floor. No build below this is allowed to keep running, whatever its
