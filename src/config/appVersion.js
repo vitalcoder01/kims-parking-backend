@@ -85,12 +85,21 @@ const V1_9_19 = release(
  * receiving its own releases, which is the kind of bug you only find when
  * someone complains they never got an update.
  */
+// Temporarily reverted from V1_9_19 to V1_9_18: the v1.9.19 APK that
+// went up had the WRONG internal versionCode (52 instead of 53, my
+// staging mistake on the release commit), so users installing it stayed
+// at 52 while the backend said 53 — an infinite update-prompt loop.
+// Restoring to V1_9_18 unblocks every existing install (their APK IS
+// v1.9.18 by manifest, matches the channel again, prompt goes away and
+// the app opens). Will move back to V1_9_19 the moment the rebuilt APK
+// (with the correct versionCode 53) is pushed to the releases/ folder
+// and its URL resolves live.
 const BY_ROLE = {
-  admin: V1_9_19,
-  valet: V1_9_19,
-  driver: V1_9_19,
-  doctor: V1_9_19,
-  staff: V1_9_19,
+  admin: V1_9_18,
+  valet: V1_9_18,
+  driver: V1_9_18,
+  doctor: V1_9_18,
+  staff: V1_9_18,
 };
 
 /*
@@ -102,7 +111,7 @@ const BY_ROLE = {
  * release the broadest set of users is on — it is what someone sees at the
  * login screen, before their own channel can apply.
  */
-const DEFAULT = V1_9_19;
+const DEFAULT = V1_9_18;
 
 /*
  * The floor. No build below this is allowed to keep running, whatever its
