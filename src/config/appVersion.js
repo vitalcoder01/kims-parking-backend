@@ -65,6 +65,12 @@ const V1_9_19 = release(
   'Two-station valet handoff: the gate valet raises retrievals, the lot valet assigns the driver, and each side rings the other when a car is on its way. Drivers no longer use the app — the valet confirms parking and arrival straight from their own screen, no more waiting on a driver-side "in transit" tap. Live tracking is a clear status checklist now rather than an empty map, and admins can force-free a driver stuck on a dead job. Everything from v1.9.18 preserved (co-pilot, tiered alarms, error boundary, sync-race fixes).',
 );
 
+const V1_9_20 = release(
+  54,
+  '1.9.20',
+  'Brings the app level with the web app. Admins can now free a driver stuck on a dead job from the Staff screen. When two jobs need a driver at the same moment, the second prompt now waits its turn instead of replacing the first. Analytics gets Today, This Week, This Month and This Year filters, a Park vs Retrieve trend and Block Utilization. The download is also smaller again, about 40 MB instead of 71 MB. Everything from 1.9.19 is preserved.',
+);
+
 // ── Channels ─────────────────────────────────────────────────────────────
 /*
  * To ship to one role: add the release constant above, then point that
@@ -86,11 +92,11 @@ const V1_9_19 = release(
  * someone complains they never got an update.
  */
 const BY_ROLE = {
-  admin: V1_9_19,
-  valet: V1_9_19,
-  driver: V1_9_19,
-  doctor: V1_9_19,
-  staff: V1_9_19,
+  admin: V1_9_20,
+  valet: V1_9_20,
+  driver: V1_9_20,
+  doctor: V1_9_20,
+  staff: V1_9_20,
 };
 
 /*
@@ -102,7 +108,7 @@ const BY_ROLE = {
  * release the broadest set of users is on — it is what someone sees at the
  * login screen, before their own channel can apply.
  */
-const DEFAULT = V1_9_19;
+const DEFAULT = V1_9_20;
 
 /*
  * The floor. No build below this is allowed to keep running, whatever its
