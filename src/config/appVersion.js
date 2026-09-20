@@ -71,6 +71,12 @@ const V1_9_20 = release(
   'Brings the app level with the web app. Admins can now free a driver stuck on a dead job from the Staff screen. When two jobs need a driver at the same moment, the second prompt now waits its turn instead of replacing the first. Analytics gets Today, This Week, This Month and This Year filters, a Park vs Retrieve trend and Block Utilization. The download is also smaller again, about 40 MB instead of 71 MB. Everything from 1.9.19 is preserved.',
 );
 
+const V1_9_21 = release(
+  55,
+  '1.9.21',
+  'Everything the web app has is now in the app. Admins get the new Dashboard: live parking activity, hourly demand, slot map, task funnel, service reliability and process timing, for Today, This Week, This Month, This Year or All-time. The Map tab shows one block at a time, and tapping a slot on the Dashboard opens it on the right block. Doctors and staff can create their own account from the sign-in screen. If the new Dashboard ever fails to load, the previous Operations screen appears instead. Everything from 1.9.20 is preserved.',
+);
+
 // ── Channels ─────────────────────────────────────────────────────────────
 /*
  * To ship to one role: add the release constant above, then point that
@@ -92,11 +98,11 @@ const V1_9_20 = release(
  * someone complains they never got an update.
  */
 const BY_ROLE = {
-  admin: V1_9_20,
-  valet: V1_9_20,
-  driver: V1_9_20,
-  doctor: V1_9_20,
-  staff: V1_9_20,
+  admin: V1_9_21,
+  valet: V1_9_21,
+  driver: V1_9_21,
+  doctor: V1_9_21,
+  staff: V1_9_21,
 };
 
 /*
@@ -108,7 +114,7 @@ const BY_ROLE = {
  * release the broadest set of users is on — it is what someone sees at the
  * login screen, before their own channel can apply.
  */
-const DEFAULT = V1_9_20;
+const DEFAULT = V1_9_21;
 
 /*
  * The floor. No build below this is allowed to keep running, whatever its
