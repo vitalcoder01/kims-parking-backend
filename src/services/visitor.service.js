@@ -13,15 +13,10 @@ function taskService() { return require('./task.service'); }
 const whatsapp = require('./whatsapp.service');
 const { serializeVisitor, serializeSlot } = require('../utils/serialize');
 
-// Public tracking links carry either the publicToken (a non-numeric cuid)
-// or, for old-style callers, the raw numeric id — `id` is now an Int
-// column, so including it in the OR unconditionally throws a Prisma
-// validation error whenever the value isn't numeric.
+// Public tracking links resolve strictly by the unguessable publicToken cuid.
+// Numeric database ID lookup is prohibited to prevent enumeration scraping.
 function publicLookupWhere(idOrToken) {
-  const numeric = Number(idOrToken);
-  const or = [{ publicToken: String(idOrToken) }];
-  if (Number.isFinite(numeric)) or.push({ id: numeric });
-  return { OR: or };
+  return { publicToken: String(idOrToken) };
 }
 
 function generateToken() {
@@ -73,10 +68,11 @@ const visitorInclude = {
   driver: { include: { user: true } },
 };
 
-// Realtime deltas — same contract as task.service.js: emit the changed
-// record itself so clients patch in place instead of refetching.
+// Realtime deltas — scoped strictly to dispatch and operations roles.
+// Doctors and staff have no operational need for walk-in visitor records,
+// and serializeVisitor carries the visitor's private phone number.
 function emitVisitor(visitor) {
-  realtime.emitAll('visitor:upsert', serializeVisitor(visitor));
+  realtime.emitToRoles(['valet', 'admin'], 'visitor:upsert', serializeVisitor(visitor));
 }
 function emitDriverPatch(id, status, currentTaskId) {
   realtime.emitAll('driver:patch', { id, status, currentTaskId: currentTaskId ?? undefined });

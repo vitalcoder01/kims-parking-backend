@@ -40,10 +40,14 @@ function emitTask(task) {
   const restricted = task.type === 'retrieve' && owner != null && !ownerIsGateStation && !isRetrievalOpenToAll(task);
 
   if (!restricted) {
-    realtime.emitAll('task:upsert', payload);
+    realtime.emitToRoles(['valet', 'admin'], 'task:upsert', payload);
+    if (task.doctorId != null) realtime.emitToUser(task.doctorId, 'task:upsert', payload);
+    if (task.driverId != null) realtime.emitToDriver(task.driverId, 'task:upsert', payload);
     return;
   }
-  realtime.emitToRoles(['doctor', 'staff', 'driver', 'admin'], 'task:upsert', payload);
+  realtime.emitToRoles(['admin'], 'task:upsert', payload);
+  if (task.doctorId != null) realtime.emitToUser(task.doctorId, 'task:upsert', payload);
+  if (task.driverId != null) realtime.emitToDriver(task.driverId, 'task:upsert', payload);
   realtime.emitToUser(owner, 'task:upsert', payload);
   // Delivery leg: once a driver is dispatched, the gate station is the
   // physical receiver and needs this on their screen (waitingNote + the
@@ -215,16 +219,23 @@ async function syncVisitorFromTask(task) {
       data.trackingProgress = null;
     }
   } else if (task.type === 'retrieve') {
-    if (task.driverId != null) data.driverId = task.driverId;
-    if (task.status === 'delivered') data.status = 'delivered';
-    if (task.status === 'completed') data.status = 'retrieved';
+    if (task.status === 'cancelled') {
+      data.retrievalRequested = false;
+      data.driverId = null;
+      data.driverAssignedAt = null;
+      data.acceptedAt = null;
+    } else {
+      if (task.driverId != null) data.driverId = task.driverId;
+      if (task.status === 'delivered') data.status = 'delivered';
+      if (task.status === 'completed') data.status = 'retrieved';
+    }
   }
 
   if (Object.keys(data).length === 0) return;
   await prisma.visitor.update({ where: { id: task.visitorId }, data })
     .then(v => {
       cache.invalidate('visitors:');
-      realtime.emitAll('visitor:upsert', require('../utils/serialize').serializeVisitor(v));
+      realtime.emitToRoles(['valet', 'admin'], 'visitor:upsert', require('../utils/serialize').serializeVisitor(v));
     })
     .catch(() => { /* the task is what matters; the mirror is a view */ });
 }
@@ -1473,9 +1484,13 @@ async function cancelTask(taskId, byDoctorId) {
     // is no guessing about which row to restore.
     let restored = null;
     if (task.type === 'retrieve') {
-      const slot = await tx.parkingSlot.findFirst({
-        where: { status: 'occupied', doctorId: task.doctorId, taskId: { not: null } },
-      });
+      const slot = task.slotId
+        ? await tx.parkingSlot.findUnique({ where: { id: task.slotId } })
+        : (task.doctorId
+          ? await tx.parkingSlot.findFirst({
+              where: { status: 'occupied', doctorId: task.doctorId, taskId: { not: null } },
+            })
+          : null);
       if (slot?.taskId) {
         // The cancelled row already stepped down in the update above, which
         // matters: "at most one isCurrent row per doctor" is a partial unique

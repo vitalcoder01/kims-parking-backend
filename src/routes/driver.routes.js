@@ -6,7 +6,7 @@ const { requireRole } = require('../middleware/role.middleware');
 const router = express.Router();
 router.use(requireAuth);
 
-router.get('/', ctrl.list);
+router.get('/', requireRole('valet', 'admin', 'driver'), ctrl.list);
 router.patch('/:id/status', requireRole('driver', 'valet', 'admin'), ctrl.setStatus);
 // Admin-only: forcibly cancels whatever job has this driver stuck and frees
 // them, bypassing the normal state machine — see driverService.forceFreeDriver.

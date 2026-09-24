@@ -435,6 +435,11 @@ async function updateOwnDesignation(id, role) {
   if (role !== 'doctor' && role !== 'staff') {
     throw ApiError.badRequest('Designation must be doctor or staff');
   }
+  const current = await prisma.user.findUnique({ where: { id }, select: { role: true } });
+  if (!current) throw ApiError.notFound('User not found');
+  if (current.role !== 'doctor' && current.role !== 'staff') {
+    throw ApiError.forbidden('Only doctor or staff accounts can update designation');
+  }
   const updated = await prisma.user.update({ where: { id }, data: { role }, include: { driver: true } });
   invalidateUserCache(id);
   return updated;

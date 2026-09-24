@@ -299,7 +299,7 @@ async function reconcileOrphanedDriverAssignments() {
 // them right away without cancelling the whole job.
 async function cancelTaskAssignment(taskId) {
   const task = await prisma.parkingTask.findUnique({ where: { id: taskId } });
-  if (!task || !task.driverId || task.acceptedAt || task.status !== 'assigned') {
+  if (!task || !task.driverId || task.status !== 'assigned' || task.keyCollectedAt != null) {
     throw ApiError.conflict('There is no pending driver assignment to cancel on this job');
   }
   disarm('task', taskId);
@@ -309,7 +309,7 @@ async function cancelTaskAssignment(taskId) {
 // Same, for a visitor's pickup assignment.
 async function cancelVisitorAssignment(visitorId) {
   const visitor = await prisma.visitor.findUnique({ where: { id: visitorId } });
-  if (!visitor || !visitor.driverId || visitor.acceptedAt || visitor.status !== 'pending') {
+  if (!visitor || !visitor.driverId || visitor.status !== 'pending' || visitor.pickedUpAt != null) {
     throw ApiError.conflict('There is no pending driver assignment to cancel on this visitor');
   }
   disarm('visitor', visitorId);
@@ -321,8 +321,7 @@ async function cancelVisitorAssignment(visitorId) {
 // left for the old accept-timeout to time out, and no GPS ping to watch for
 // either. Instead this is a plain wall-clock check: has this job sat at
 // key_collected/assigned too long with no valet confirming it done? Alerts
-// the owning valet rather than rolling anything back — nobody but a valet
-// can act on this anyway, so there's nothing to automatically reassign.
+// the station responsible for the next confirmation step.
 async function fireMovementTimeout(taskId, driverId) {
   const task = await prisma.parkingTask.findUnique({ where: { id: taskId }, include: taskInclude });
   // Already confirmed (or moved on) by the time this fired — nothing to
@@ -334,9 +333,12 @@ async function fireMovementTimeout(taskId, driverId) {
   if (!stillWaiting) return;
 
   const driverName = task.driver?.user?.name ?? 'The driver';
-  const owner = task.valetId ?? task.arrivalOwnerValetId ?? task.retrievalOwnerValetId;
+  // Two-station handoff model: park confirmation is done by the lot station
+  // (confirmParked in slot); retrieval arrival confirmation is done by the
+  // gate station (confirmArrived at entrance).
+  const targetRole = task.type === 'park' ? 'valetStation:lot' : 'valetStation:gate';
   await notificationService.push({
-    ...(owner ? { targetRole: `valet:${owner}`, targetUserId: owner } : { targetRole: 'valet' }),
+    targetRole,
     title: '⏱️ Job not confirmed yet',
     body: `${task.carNumber} with ${driverName} hasn't been confirmed ${task.type === 'park' ? 'parked' : 'arrived'} yet — check on it.`,
     type: 'alarm',

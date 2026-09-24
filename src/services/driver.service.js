@@ -22,8 +22,9 @@ const CACHE_TTL_MS = 2500;
 // One grouped query rather than a count per driver, so this stays a single
 // round trip no matter how many drivers are on shift.
 async function completedTodayByDriver() {
-  const since = new Date();
-  since.setHours(0, 0, 0, 0);
+  const now = new Date();
+  const istDate = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+  const since = new Date(Date.UTC(istDate.getUTCFullYear(), istDate.getUTCMonth(), istDate.getUTCDate()) - (5.5 * 60 * 60 * 1000));
   const rows = await prisma.parkingTask.groupBy({
     by: ['driverId'],
     where: { status: 'completed', completedAt: { gte: since }, driverId: { not: null } },

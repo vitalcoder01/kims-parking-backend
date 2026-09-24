@@ -1,8 +1,11 @@
 const prisma = require('../config/database');
 
+// Anchor calendar day to Indian Standard Time (IST, UTC+05:30) so night-shift
+// check-ins (between 00:00 and 05:30 AM IST) are recorded on the correct day.
 function todayDateOnly() {
-  const d = new Date();
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const now = new Date();
+  const istDate = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+  return new Date(Date.UTC(istDate.getUTCFullYear(), istDate.getUTCMonth(), istDate.getUTCDate()));
 }
 
 async function checkIn(userId, gate) {
