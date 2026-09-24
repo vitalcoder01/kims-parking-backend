@@ -101,8 +101,14 @@ async function listForUser(user) {
   if (user.role === 'valet') roleTags.push(`valet:${user.id}`);
   // A valet who reconnects (or never had the live socket event) can still
   // recover a station-addressed alert through this REST fallback, same
-  // reasoning as the 'valet:<id>' tag above.
-  if (user.role === 'valet' && user.valetStation) roleTags.push(`valetStation:${user.valetStation}`);
+  // reasoning as the 'valet:<id>' tag above. Floating supervisors oversee both.
+  if (user.role === 'valet') {
+    if (user.valetStation) {
+      roleTags.push(`valetStation:${user.valetStation}`);
+    } else {
+      roleTags.push('valetStation:gate', 'valetStation:lot');
+    }
+  }
 
   return prisma.notification.findMany({
     where: {

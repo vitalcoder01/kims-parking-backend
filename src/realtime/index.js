@@ -37,8 +37,18 @@ function refreshValetStationRooms(userId, newStation) {
     if (socket.data.user?.id !== userId) continue;
     const oldStation = socket.data.user.valetStation;
     if (oldStation === newStation) continue;
-    if (oldStation) socket.leave(`role:valetStation:${oldStation}`);
-    if (newStation) socket.join(`role:valetStation:${newStation}`);
+    if (oldStation) {
+      socket.leave(`role:valetStation:${oldStation}`);
+    } else {
+      socket.leave('role:valetStation:gate');
+      socket.leave('role:valetStation:lot');
+    }
+    if (newStation) {
+      socket.join(`role:valetStation:${newStation}`);
+    } else {
+      socket.join('role:valetStation:gate');
+      socket.join('role:valetStation:lot');
+    }
     socket.data.user.valetStation = newStation;
   }
 }
@@ -80,7 +90,15 @@ function initRealtime(server) {
     // 'role:<name>' room convention (emitToRoles/notification targetRole
     // both already know how to address 'role:<anything>') rather than
     // adding a second addressing scheme.
-    if (role === 'valet' && valetStation) socket.join(`role:valetStation:${valetStation}`);
+    if (role === 'valet') {
+      if (valetStation) {
+        socket.join(`role:valetStation:${valetStation}`);
+      } else {
+        // Floating supervisors without a fixed station oversee both stations:
+        socket.join('role:valetStation:gate');
+        socket.join('role:valetStation:lot');
+      }
+    }
     if (driverId) {
       socket.join(`driver:${driverId}`);
       const count = (driverSockets.get(driverId) ?? 0) + 1;
