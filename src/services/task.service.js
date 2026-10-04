@@ -1731,8 +1731,18 @@ async function gateHandoff({ doctorId, carNumber, slotId, driverId, valetId }) {
 }
 
 // Universal operational force-resolution & stale task recovery
-async function forceResolveTask(taskId, { action = 'void_cancel', slotId, reason, operatorUserId } = {}) {
+async function forceResolveTask(taskId, { action = 'void_cancel', slotId, reason, operatorUserId, callerRole, callerDriverId } = {}) {
   const existing = await getTask(taskId);
+  if (callerRole === 'doctor' || callerRole === 'staff') {
+    if (existing.doctorId !== operatorUserId) {
+      throw ApiError.forbidden('You can only resolve your own parking tasks');
+    }
+  }
+  if (callerRole === 'driver') {
+    if (callerDriverId != null && existing.driverId !== callerDriverId) {
+      throw ApiError.forbidden('You can only resolve jobs assigned to you');
+    }
+  }
   watchdog.disarm('task', taskId);
   watchdog.disarm('movement', taskId);
 

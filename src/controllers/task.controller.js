@@ -300,6 +300,8 @@ const forceResolve = asyncHandler(async (req, res) => {
     slotId,
     reason,
     operatorUserId: req.user.id,
+    callerRole: req.user.role,
+    callerDriverId: callerDriverId(req),
   });
   res.json({ task: serializeTask(task) });
 });
