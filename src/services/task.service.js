@@ -1394,10 +1394,8 @@ async function closeParkedSession(taskId) {
   const existing = await getTask(taskId);
   if (existing.type !== 'park') throw ApiError.conflict('Only a parking session can be closed this way', 'JOB_GONE');
   if (existing.status !== 'completed') {
-    // Anything not yet parked is a live job with its own proper ending
-    // (cancel, recall, or just finishing) — routing it through here would
-    // skip the driver/notification handling those paths do.
-    throw ApiError.conflict('This car is not parked yet — cancel or recall the job instead', 'JOB_GONE');
+    // If not completed, use forceResolveTask to safely void the job, free any driver and slot!
+    return forceResolveTask(taskId, { action: 'void_cancel', reason: 'valet_closed_uncompleted_session' });
   }
 
   const { task, slot } = await prisma.$transaction(async (tx) => {
@@ -1732,6 +1730,149 @@ async function gateHandoff({ doctorId, carNumber, slotId, driverId, valetId }) {
   return markKeyCollected(task.id);
 }
 
+// Universal operational force-resolution & stale task recovery
+async function forceResolveTask(taskId, { action = 'void_cancel', slotId, reason, operatorUserId } = {}) {
+  const existing = await getTask(taskId);
+  watchdog.disarm('task', taskId);
+  watchdog.disarm('movement', taskId);
+
+  const { task, slot, freedDriver } = await prisma.$transaction(async (tx) => {
+    let freed = false;
+    if (existing.driverId) {
+      freed = await freeDriverIfStillOn(tx, existing.driverId, taskId);
+    }
+
+    let updatedSlot = null;
+    let targetSlotId = slotId || existing.slotId || null;
+
+    if (action === 'complete_parked') {
+      if (targetSlotId) {
+        const s = await tx.parkingSlot.findUnique({ where: { id: targetSlotId } });
+        if (s) {
+          updatedSlot = await tx.parkingSlot.update({
+            where: { id: targetSlotId },
+            data: {
+              status: 'occupied',
+              carNumber: existing.carNumber,
+              doctorId: existing.doctorId,
+              taskId: existing.id,
+            },
+          });
+        }
+      }
+      const updated = await tx.parkingTask.update({
+        where: { id: taskId },
+        data: {
+          status: 'completed',
+          slotId: targetSlotId,
+          completedAt: new Date(),
+          trackingProgress: 1,
+        },
+        include: taskInclude,
+      });
+      return { task: updated, slot: updatedSlot, freedDriver: freed };
+    }
+
+    if (action === 'complete_delivered') {
+      if (existing.slotId) {
+        const s = await tx.parkingSlot.findUnique({ where: { id: existing.slotId } });
+        if (s && (s.taskId === taskId || s.carNumber === existing.carNumber)) {
+          updatedSlot = await tx.parkingSlot.update({
+            where: { id: existing.slotId },
+            data: { status: 'free', taskId: null, carNumber: null, doctorId: null },
+          });
+        }
+      }
+      const updated = await tx.parkingTask.update({
+        where: { id: taskId },
+        data: {
+          status: existing.type === 'park' ? 'completed' : 'delivered',
+          completedAt: new Date(),
+          isCurrent: false,
+          trackingProgress: 1,
+        },
+        include: taskInclude,
+      });
+      return { task: updated, slot: updatedSlot, freedDriver: freed };
+    }
+
+    // Default: 'void_cancel'
+    if (existing.slotId) {
+      const s = await tx.parkingSlot.findUnique({ where: { id: existing.slotId } });
+      if (s && (s.taskId === taskId || s.carNumber === existing.carNumber)) {
+        updatedSlot = await tx.parkingSlot.update({
+          where: { id: existing.slotId },
+          data: { status: 'free', taskId: null, carNumber: null, doctorId: null },
+        });
+      }
+    }
+    const updated = await tx.parkingTask.update({
+      where: { id: taskId },
+      data: {
+        status: 'cancelled',
+        completedAt: new Date(),
+        isCurrent: false,
+      },
+      include: taskInclude,
+    });
+    return { task: updated, slot: updatedSlot, freedDriver: freed };
+  });
+
+  cache.invalidate('tasks:');
+  cache.invalidate('slots:');
+  cache.invalidate('drivers:');
+  cache.invalidate('visitors:');
+
+  emitTask(task);
+  if (slot) emitSlot(slot);
+  if (freedDriver && existing.driverId) {
+    emitDriverPatch(existing.driverId, 'available', null);
+  }
+
+  if (task.visitorId) {
+    await prisma.visitor.updateMany({
+      where: { id: task.visitorId, status: { notIn: ['retrieved', 'cancelled'] } },
+      data: {
+        status: action === 'complete_parked' ? 'parked'
+          : action === 'complete_delivered' ? 'retrieved'
+          : 'cancelled',
+        slotId: action === 'complete_parked' ? task.slotId : null,
+        ...(action === 'void_cancel' ? { cancelledAt: new Date(), cancelReason: reason || 'valet_force_cancelled' } : {}),
+      },
+    }).catch(() => {});
+  }
+
+  return task;
+}
+
+async function cleanupStaleTasks({ thresholdHours = 12, operatorUserId } = {}) {
+  const cutoff = new Date(Date.now() - thresholdHours * 60 * 60 * 1000);
+  const stale = await prisma.parkingTask.findMany({
+    where: {
+      status: { notIn: ['completed', 'cancelled'] },
+      createdAt: { lt: cutoff },
+    },
+    include: taskInclude,
+  });
+
+  let cleanedCount = 0;
+  for (const t of stale) {
+    try {
+      await forceResolveTask(t.id, {
+        action: 'void_cancel',
+        reason: `auto_stale_cleanup_${thresholdHours}h`,
+        operatorUserId,
+      });
+      cleanedCount++;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[taskService] failed to auto-clean stale task ${t.id}:`, err.message);
+    }
+  }
+
+  return { cleanedCount, totalFound: stale.length };
+}
+
 module.exports = {
   syncVisitorFromTask,
   ownerLabel,
@@ -1764,4 +1905,6 @@ module.exports = {
   confirmArrivedByValet,
   requestOtherStationDriver,
   gateHandoff,
+  forceResolveTask,
+  cleanupStaleTasks,
 };

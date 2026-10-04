@@ -286,7 +286,23 @@ async function reconcileOrphanedDriverAssignments() {
       }).catch(() => {});
     }
   }
+  // Reconcile drivers marked busy but whose currentTaskId is null, finished, or missing
+  const busyDrivers = await prisma.driver.findMany({ where: { status: 'busy' } });
+  for (const d of busyDrivers) {
+    if (!d.currentTaskId) {
+      await prisma.driver.update({ where: { id: d.id }, data: { status: 'available' } });
+      realtime.emitAll('driver:patch', { id: d.id, status: 'available', currentTaskId: undefined });
+    } else {
+      const taskRow = await prisma.parkingTask.findUnique({ where: { id: d.currentTaskId } });
+      if (!taskRow || taskRow.status === 'completed' || taskRow.status === 'cancelled') {
+        await prisma.driver.update({ where: { id: d.id }, data: { status: 'available', currentTaskId: null } });
+        realtime.emitAll('driver:patch', { id: d.id, status: 'available', currentTaskId: undefined });
+      }
+    }
+  }
+
   cache.invalidate('tasks:');
+  cache.invalidate('drivers:');
   // eslint-disable-next-line no-console
   console.log(`[acceptWatchdog] reconciled ${stale.length} orphaned driver assignment(s) on boot`);
   return stale.length;

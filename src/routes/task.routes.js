@@ -63,5 +63,8 @@ router.patch('/:id/silence-driver-reminder', requireRole('valet', 'admin'), ctrl
 router.patch('/:id/recall', requireRole('valet', 'admin'), ctrl.recall);
 // Driver confirms they've brought a recalled car back to the counter.
 router.patch('/:id/returned', requireRole('driver', 'admin'), ctrl.markReturned);
+// Universal operational force-resolution & stale task recovery
+router.patch('/:id/force-resolve', requireRole('valet', 'admin'), ctrl.forceResolve);
+router.post('/cleanup-stale', requireRole('valet', 'admin'), ctrl.cleanupStale);
 
 module.exports = router;

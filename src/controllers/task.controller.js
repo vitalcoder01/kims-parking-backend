@@ -289,4 +289,25 @@ const cancelMyRetrieval = asyncHandler(async (req, res) => {
 });
 
 
-module.exports = { list, get, create, gateHandoff, requestRetrieval, requestRetrievalForDoctor, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, confirmParked, requestOtherStation, retrieve, confirmArrived, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder };
+// Universal operational force-resolution & stale task recovery
+const forceResolve = asyncHandler(async (req, res) => {
+  const { action, slotId, reason } = req.body;
+  if (!action || !['complete_parked', 'complete_delivered', 'void_cancel'].includes(action)) {
+    throw ApiError.badRequest('Valid action is required: complete_parked, complete_delivered, or void_cancel');
+  }
+  const task = await taskService.forceResolveTask(parseId(req.params.id), {
+    action,
+    slotId,
+    reason,
+    operatorUserId: req.user.id,
+  });
+  res.json({ task: serializeTask(task) });
+});
+
+const cleanupStale = asyncHandler(async (req, res) => {
+  const thresholdHours = req.body.thresholdHours ? Number(req.body.thresholdHours) : 12;
+  const result = await taskService.cleanupStaleTasks({ thresholdHours, operatorUserId: req.user.id });
+  res.json(result);
+});
+
+module.exports = { list, get, create, gateHandoff, requestRetrieval, requestRetrievalForDoctor, assignDriver, assignRetrievalDriverForDoctor, cancelAssignment, acceptRetrieval, cancelMyRetrieval, accept, reject, keyCollected, inTransit, park, confirmParked, requestOtherStation, retrieve, confirmArrived, confirmDelivered, cancel, closeParked, recall, markReturned, acknowledge, silenceDriverReminder, forceResolve, cleanupStale };
